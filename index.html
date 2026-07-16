@@ -173,7 +173,7 @@ input,select,textarea{font-family:inherit;}
 .icon-btn:hover{background:rgba(20,120,212,0.18); transform:translateY(-2px);}
 [data-theme="dark"] .icon-btn{background:rgba(59,150,232,0.14);}
 
-.content{padding:26px 30px 60px; flex:1;}
+.content{padding:26px 30px 0px; flex:1;}
 .view{display:none; animation:fadeUp .35s ease;}
 .view.active{display:block;}
 @keyframes fadeUp{from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);}}
@@ -181,7 +181,22 @@ input,select,textarea{font-family:inherit;}
 .footer-copy{
   text-align:center; padding:22px 10px 30px; font-size:12px; color:var(--text-muted); font-weight:500;
 }
-.footer-copy b{color:var(--accent);}
+.footer-copy {
+  position: fixed;
+  bottom: 0;
+  right: 0;
+  width: calc(100% - var(--sidebar-w)); /* Trừ đi chiều rộng của sidebar */
+  background: var(--card-bg); /* Thêm màu nền hiệu ứng kính để không lộ nội dung cuộn bên dưới */
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  border-top: 1px solid var(--card-border);
+  z-index: 90;
+  text-align: center; 
+  padding: 15px 10px; /* Giảm nhẹ padding để không chiếm quá nhiều diện tích cố định */
+  font-size: 12px; 
+  color: var(--text-muted); 
+  font-weight: 500;
+}
 
 /* ==========================================================================
    COMMON COMPONENTS
@@ -554,6 +569,7 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
   .main-wrap{margin-left:0; width:100%;}
   .hamburger{display:flex;}
   .result-stats{grid-template-columns:repeat(2,1fr);}
+   .footer-copy{width:100%;}
 }
 @media (max-width:520px){
   .content{padding:16px;}
