@@ -1855,14 +1855,26 @@ const QuizManager = {
     this.renderCurrentQuestion();
   },
 
-  resumePart(partIndex){
+resumePart(partIndex){
     const meta = QuestionManager.allPartsMeta()[partIndex];
     const prog = ProgressManager.get(meta.id);
     if(!prog){ this.startPart(partIndex); return; }
+    
     this.state = prog.state;
+
+    // --- BỔ SUNG: PHỤC HỒI LẠI KIỂU DỮ LIỆU SET ---
+    if (Array.isArray(this.state.firstTryCorrectIds)) {
+        this.state.firstTryCorrectIds = new Set(this.state.firstTryCorrectIds);
+    }
+    if (Array.isArray(this.state.firstTryWrongIds)) {
+        this.state.firstTryWrongIds = new Set(this.state.firstTryWrongIds);
+    }
+    // ----------------------------------------------
+
     this.state.startTime = Date.now() - (prog.state.elapsedBeforePause || 0);
     this.enterQuizView();
     this.renderCurrentQuestion();
+  },
   },
 
   startPartReviewOnly(partIndex){
