@@ -504,12 +504,17 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
 /* user badge trên topbar */
 .user-badge{display:flex; align-items:center; gap:9px; padding:5px 12px 5px 5px; border-radius:30px; background:rgba(20,120,212,.08);}
 .user-badge img{width:30px; height:30px; border-radius:50%;}
-.user-badge span{font-size:12.5px; font-weight:700; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
-@media (max-width:600px){ .user-badge span{display:none;} }
+.user-badge span#userBadgeName{font-size:12.5px; font-weight:700; white-space:nowrap;}
+@media (max-width:600px){ .user-badge span#userBadgeName{display:none;} }
 .admin-badge{
   display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:20px;
   font-size:10.5px; font-weight:800; letter-spacing:.4px;
   background:linear-gradient(135deg,#f59e0b,#f97316); color:#fff; flex-shrink:0;
+}
+.user-role-badge{
+  display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:20px;
+  font-size:10.5px; font-weight:800; letter-spacing:.4px;
+  background:rgba(20,120,212,.15); color:var(--accent); flex-shrink:0;
 }
 .admin-only-block{
   display:none; flex-direction:column; gap:8px; margin:14px 0; padding:12px 14px;
@@ -682,6 +687,7 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
           <img id="userBadgeAvatar" src="" alt="avatar">
           <span id="userBadgeName">-</span>
           <span id="adminBadge" class="admin-badge" style="display:none;"><i class="fa-solid fa-crown"></i> ADMIN</span>
+          <span id="userRoleBadge" class="user-role-badge" style="display:none;"><i class="fa-solid fa-user"></i> USER</span>
         </div>
         <button class="icon-btn" id="darkToggleBtn" data-tip="Dark Mode"><i class="fa-solid fa-moon"></i></button>
         <button class="icon-btn" id="resetBtn" data-tip="Reset dữ liệu"><i class="fa-solid fa-trash-can"></i></button>
@@ -3287,6 +3293,8 @@ const AuthManager = {
     document.getElementById('userBadgeName').textContent = user.displayName || user.email;
     const adminBadge = document.getElementById('adminBadge');
     if(adminBadge) adminBadge.style.display = this.isAdmin() ? 'inline-flex' : 'none';
+    const userRoleBadge = document.getElementById('userRoleBadge');
+    if(userRoleBadge) userRoleBadge.style.display = this.isAdmin() ? 'none' : 'inline-flex';
 
     // Bắt đầu (hoặc reset) bộ đếm tự động đăng xuất khi không thao tác
     this.startIdleWatcher();
