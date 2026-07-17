@@ -3407,5 +3407,198 @@ document.addEventListener('keydown', function(e) {
     }
 });
 </script>
+
+<!-- ============================================================================
+     ĐOẠN BỔ SUNG (KHÔNG SỬA BẤT KỲ CODE NÀO Ở TRÊN) — tính năng:
+     "Admin xem được TẤT CẢ đề do từng user tải lên, hiển thị rõ email người
+     đã upload. Các user thường vẫn CHỈ thấy đề riêng (private) của chính mình
+     như hiện tại — không thấy đề riêng của user khác."
+
+     Cơ chế: mỗi đề riêng của user thường đã được lưu ở
+     users/{uid}/customExams/{examId} (đã có field createdByEmail sẵn).
+     Trước đây chỉ chính chủ uid đó nghe (onSnapshot) được collection này.
+     Đoạn dưới đây, khi đăng nhập là Admin, sẽ mở thêm 1 truy vấn
+     collectionGroup('customExams') để gom TẤT CẢ document customExams của
+     MỌI user lại một chỗ, kèm ownerUid lấy từ đường dẫn cha (users/{uid}).
+
+     ‼️ CẦN CẬP NHẬT FIRESTORE SECURITY RULES để Admin đọc được (và xoá được
+     nếu muốn) đề riêng của user khác qua collectionGroup, ví dụ thêm rule:
+
+     match /{path=**}/customExams/{examId} {
+       allow read, delete: if request.auth != null &&
+         get(/databases/$(database)/documents/allowedUsers/$(request.auth.token.email.lower())).data.role == 'admin';
+     }
+
+     (Nếu chưa thêm rule này, panel bên dưới sẽ báo lỗi "thiếu quyền" khi tải —
+      user thường không bị ảnh hưởng gì vì họ không chạy truy vấn này.)
+     ========================================================================== */
+<script>
+(function(){
+
+  // ---- 1) Lắng nghe TOÀN BỘ đề riêng của mọi user (chỉ bật khi là Admin) ----
+  const AdminExamWatcher = {
+    list: [],      // [{id, ownerUid, ownerEmail(createdByEmail), ...data đề thi}]
+    unsub: null,
+    active: false,
+
+    start(){
+      if(this.active) return;
+      this.active = true;
+      this.unsub = fbDb.collectionGroup('customExams').orderBy('createdAt','desc')
+        .onSnapshot(snap=>{
+          this.list = snap.docs.map(d=>{
+            const parentUserDoc = d.ref.parent.parent; // users/{uid}
+            return { id: d.id, ownerUid: parentUserDoc ? parentUserDoc.id : null, ...d.data() };
+          }).filter(x=>x.ownerUid);
+          AdminExamPanel.render();
+        }, err=>{
+          console.error('[Admin] Lỗi tải danh sách đề của tất cả user:', err);
+          AdminExamPanel.renderError(err);
+        });
+    },
+    stop(){
+      if(this.unsub){ try{ this.unsub(); }catch(e){} }
+      this.unsub = null;
+      this.list = [];
+      this.active = false;
+    }
+  };
+
+  // ---- 2) Panel hiển thị — được CHÈN THÊM vào DOM, không đụng HTML gốc ----
+  const AdminExamPanel = {
+    containerId: 'adminAllUserExamsPanel',
+    gridId: 'adminAllUserExamsGrid',
+
+    ensureDom(){
+      if(document.getElementById(this.containerId)) return;
+      const grid = document.getElementById('customExamGrid');
+      if(!grid || !grid.parentNode) return;
+      const wrap = document.createElement('div');
+      wrap.id = this.containerId;
+      wrap.style.marginBottom = '26px';
+      wrap.innerHTML = `
+        <div class="section-head" style="margin-top:6px;">
+          <div>
+            <h2><i class="fa-solid fa-user-shield"></i> Đề do từng người dùng tải lên (chỉ Admin thấy)</h2>
+            <p>Mỗi đề hiển thị rõ email người đã tải lên. Các user khác KHÔNG nhìn thấy đề riêng của nhau.</p>
+          </div>
+        </div>
+        <div id="${this.gridId}" class="parts-grid" style="margin-bottom:8px;"></div>
+      `;
+      grid.parentNode.insertBefore(wrap, grid.nextSibling);
+    },
+
+    render(){
+      if(typeof AuthManager==='undefined' || !AuthManager.isAdmin()) return;
+      this.ensureDom();
+      const gridEl = document.getElementById(this.gridId);
+      if(!gridEl) return;
+      // Ẩn bớt đề riêng của chính Admin (đã hiển thị sẵn ở lưới "Đề tự tạo" phía trên)
+      const list = AdminExamWatcher.list.filter(e=> e.ownerUid !== CloudSync.uid);
+      if(!list.length){
+        gridEl.innerHTML = `<div class="empty-state" style="grid-column:1/-1;">
+          <i class="fa-solid fa-inbox"></i><p>Chưa có user nào khác tải lên đề riêng.</p></div>`;
+        return;
+      }
+      gridEl.innerHTML = list.map(e=>{
+        const isJson = e.type === 'json';
+        return `<div class="card custom-exam-card">
+          <div class="part-top">
+            <span class="part-name">${Utils.escapeHtml(e.name||'(không tên)')}</span>
+            <span class="exam-type-badge ${e.type}">${isJson ? 'JSON' : 'PDF'}</span>
+          </div>
+          <div class="part-meta"><span>${e.totalQuestions||0} câu</span><span>${e.createdAt ? new Date(e.createdAt).toLocaleDateString('vi-VN') : ''}</span></div>
+          <div class="part-meta">
+            <span class="exam-owner-private" style="display:flex;align-items:center;gap:6px;">
+              <i class="fa-solid fa-circle-user"></i> Người tải lên: <b>${Utils.escapeHtml(e.createdByEmail || '(không rõ)')}</b>
+            </span>
+          </div>
+          <div class="ce-card-actions">
+            ${!isJson ? `<button class="btn btn-outline btn-sm" onclick="AdminExamPanel.viewPdf('${e.ownerUid}','${e.id}')"><i class="fa-solid fa-eye"></i> Xem PDF</button>` : ''}
+            <button class="btn btn-ghost btn-sm" onclick="AdminExamPanel.confirmDelete('${e.ownerUid}','${e.id}','${Utils.escapeHtml((e.name||'').replace(/'/g,"\\'"))}')"><i class="fa-solid fa-trash"></i> Xóa</button>
+          </div>
+        </div>`;
+      }).join('');
+    },
+
+    renderError(err){
+      this.ensureDom();
+      const gridEl = document.getElementById(this.gridId);
+      if(!gridEl) return;
+      gridEl.innerHTML = `<div class="empty-state" style="grid-column:1/-1;color:var(--danger);">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+        <p>Không tải được danh sách (có thể do thiếu quyền Firestore Rules cho Admin). Chi tiết: ${Utils.escapeHtml(err.message||'')}</p>
+      </div>`;
+    },
+
+    async viewPdf(ownerUid, examId){
+      try{
+        const docRef = fbDb.collection('users').doc(ownerUid).collection('customExams').doc(examId);
+        const doc = await docRef.get();
+        if(!doc.exists){ UIManager.toast('error','Không tìm thấy','Đề này có thể đã bị xoá'); return; }
+        const data = doc.data();
+        let url = null;
+        if(data.pdfChunked){
+          const blob = await CloudSync.loadPdfChunks(docRef);
+          url = URL.createObjectURL(blob);
+        } else if(data.pdfBase64){
+          url = CloudSync.base64ToBlobUrl(data.pdfBase64);
+        }
+        if(url) window.open(url, '_blank');
+        else UIManager.toast('error','Không có file PDF','Đề này không có dữ liệu PDF');
+      }catch(err){ UIManager.toast('error','Lỗi', err.message); }
+    },
+
+    confirmDelete(ownerUid, examId, name){
+      UIManager.confirm(
+        'Xóa đề của người dùng khác?',
+        `Đề "${name}" sẽ bị xóa vĩnh viễn khỏi tài khoản của người đã tải lên, không thể hoàn tác.`,
+        async ()=>{
+          try{
+            const docRef = fbDb.collection('users').doc(ownerUid).collection('customExams').doc(examId);
+            const doc = await docRef.get();
+            const data = doc.exists ? doc.data() : {};
+            if(data.pdfChunked){
+              const snap = await docRef.collection('pdfChunks').get();
+              await Promise.all(snap.docs.map(d=>d.ref.delete()));
+            }
+            await docRef.delete();
+            UIManager.toast('success','Đã xóa', `Đề "${name}" đã được xóa`);
+          }catch(err){ UIManager.toast('error','Xóa thất bại', err.message); }
+        }
+      );
+    }
+  };
+
+  // ---- 3) Móc thêm vào vòng đời có sẵn — KHÔNG sửa bất kỳ hàm gốc nào,
+  //         chỉ bọc thêm (wrap) để gọi thêm hành vi mới sau khi hàm gốc chạy ----
+  const _origCloudSyncInit = CloudSync.init.bind(CloudSync);
+  CloudSync.init = async function(user, isAdmin){
+    const result = await _origCloudSyncInit(user, isAdmin);
+    if(isAdmin) AdminExamWatcher.start();
+    return result;
+  };
+
+  const _origCloudSyncTeardown = CloudSync.teardown.bind(CloudSync);
+  CloudSync.teardown = function(){
+    AdminExamWatcher.stop();
+    const panel = document.getElementById(AdminExamPanel.containerId);
+    if(panel) panel.remove();
+    return _origCloudSyncTeardown();
+  };
+
+  const _origCustomExamUIRender = CustomExamUI.render.bind(CustomExamUI);
+  CustomExamUI.render = function(){
+    const result = _origCustomExamUIRender();
+    if(typeof AuthManager!=='undefined' && AuthManager.isAdmin()) AdminExamPanel.render();
+    return result;
+  };
+
+  // Expose ra global để dùng được trong thuộc tính onclick="" của HTML sinh động
+  window.AdminExamPanel = AdminExamPanel;
+  window.AdminExamWatcher = AdminExamWatcher;
+
+})();
+</script>
 </body>
 </html>
