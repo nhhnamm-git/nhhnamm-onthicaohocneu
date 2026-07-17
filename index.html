@@ -1544,8 +1544,25 @@ const CloudSync = {
       const pdfBase64 = await this.fileToBase64(pdfFile);
       await docRef.set({ ...baseDoc, pdfBase64 });
     } else {
-      await docRef.set({ ...baseDoc, pdfChunked:true, pdfTotalBytes: pdfFile.size });
-      await this.savePdfChunks(docRef, pdfFile);
+      // FIX: ghi các chunk TRƯỚC, chỉ tạo/hoàn tất document chính SAU KHI toàn bộ
+      // chunk đã ghi thành công. Trước đây document chính (pdfChunked:true) được
+      // tạo TRƯỚC rồi mới ghi chunk — nếu quyền Firestore Rules chặn giữa chừng
+      // (ví dụ rules pdfChunks chưa được publish), document chính vẫn tồn tại
+      // nhưng "rỗng ruột" (không có chunk nào) => lỗi "Không tìm thấy dữ liệu
+      // file PDF (chunks) trong Firestore" khi mở đề. Giờ nếu ghi chunk thất bại,
+      // ta dọn sạch mọi chunk đã lỡ ghi và KHÔNG tạo document chính, để không còn
+      // đề rác nào xuất hiện trong danh sách.
+      let chunkCount;
+      try{
+        chunkCount = await this.savePdfChunks(docRef, pdfFile);
+      }catch(err){
+        try{
+          const snap = await docRef.collection('pdfChunks').get();
+          await Promise.all(snap.docs.map(d=>d.ref.delete()));
+        }catch(cleanupErr){ console.error('Lỗi dọn dẹp pdfChunks sau khi ghi thất bại:', cleanupErr); }
+        throw err;
+      }
+      await docRef.set({ ...baseDoc, pdfChunked:true, pdfTotalBytes: pdfFile.size, pdfChunkCount: chunkCount });
     }
   },
 
