@@ -14,6 +14,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
 
 
 <style>
@@ -501,6 +502,19 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
 .user-badge img{width:30px; height:30px; border-radius:50%;}
 .user-badge span{font-size:12.5px; font-weight:700; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 @media (max-width:600px){ .user-badge span{display:none;} }
+.admin-badge{
+  display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:20px;
+  font-size:10.5px; font-weight:800; letter-spacing:.4px;
+  background:linear-gradient(135deg,#f59e0b,#f97316); color:#fff; flex-shrink:0;
+}
+.admin-only-block{
+  display:none; flex-direction:column; gap:8px; margin:14px 0; padding:12px 14px;
+  border-radius:12px; border:1.5px dashed rgba(245,158,11,.5); background:rgba(245,158,11,.08);
+}
+.ce-checkbox-label{display:flex; align-items:flex-start; gap:8px; font-size:12.5px; font-weight:600; color:var(--text-main); cursor:pointer; line-height:1.4;}
+.ce-checkbox-label input{margin-top:2px; flex-shrink:0; width:16px; height:16px; cursor:pointer;}
+.exam-owner-shared{color:var(--blue-600); font-weight:700;}
+.exam-owner-private{color:var(--text-muted); font-weight:700;}
 
 .empty-state{text-align:center; padding:60px 20px; color:var(--text-muted);}
 .empty-state i{font-size:44px; color:var(--blue-300); margin-bottom:14px;}
@@ -663,6 +677,7 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
         <div class="user-badge" id="userBadge" style="display:none;">
           <img id="userBadgeAvatar" src="" alt="avatar">
           <span id="userBadgeName">-</span>
+          <span id="adminBadge" class="admin-badge" style="display:none;"><i class="fa-solid fa-crown"></i> ADMIN</span>
         </div>
         <button class="icon-btn" id="darkToggleBtn" data-tip="Dark Mode"><i class="fa-solid fa-moon"></i></button>
         <button class="icon-btn" id="resetBtn" data-tip="Reset dữ liệu"><i class="fa-solid fa-trash-can"></i></button>
@@ -856,7 +871,7 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
       <!-- ============ CUSTOM EXAM VIEW (Đề tự tạo) ============ -->
       <section class="view" id="view-customExam">
         <div class="section-head">
-          <div><h2>Đề tự tạo</h2><p>Ngân hàng đề tự tạo — tách biệt hoàn toàn với 300 câu hỏi gốc</p></div>
+          <div><h2>Đề tự tạo</h2><p>Đề do Admin tạo/chia sẻ sẽ hiện cho mọi người dùng; đề bạn tự tạo (không tick chia sẻ) chỉ riêng mình bạn thấy</p></div>
         </div>
 
         <div id="customExamEmptyState" class="empty-state" style="display:none;">
@@ -879,6 +894,10 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
               <p style="font-weight:700; margin-bottom:4px;">Kéo thả hoặc bấm để chọn file questions.json</p>
               <p style="font-size:12px; color:var(--text-muted);">Hệ thống sẽ tự kiểm tra định dạng JSON hợp lệ</p>
               <input type="file" id="fileInput" accept=".json" style="display:none;">
+            </div>
+            <div class="admin-only-block" id="jsonAdminOptions">
+              <label class="ce-checkbox-label"><input type="checkbox" id="shareJsonExamCheckbox"><span><i class="fa-solid fa-globe"></i> Chia sẻ đề này cho <b>TẤT CẢ</b> người dùng (Admin)</span></label>
+              <label class="ce-checkbox-label"><input type="checkbox" id="updateBaseBankCheckbox"><span>⚠️ Cập nhật thẳng vào <b>300 câu hỏi GỐC</b> (thay thế toàn bộ nội dung hiện tại, áp dụng cho mọi người dùng ngay lập tức)</span></label>
             </div>
             <div id="importStatus" style="margin-top:16px; font-size:13px;"></div>
           </div>
@@ -923,6 +942,9 @@ input:checked + .slider-toggle::before{transform:translateX(21px);}
               <p style="font-weight:700; margin-bottom:4px;" id="excelDropzoneLabel">Kéo thả hoặc bấm để chọn file Excel đáp án đã điền</p>
               <p style="font-size:12px; color:var(--text-muted);">Định dạng .xlsx / .xls, gồm cột STT và Đáp án</p>
               <input type="file" id="excelFileInput" accept=".xlsx,.xls" style="display:none;">
+            </div>
+            <div class="admin-only-block" id="pdfAdminOptions">
+              <label class="ce-checkbox-label"><input type="checkbox" id="sharePdfExamCheckbox"><span><i class="fa-solid fa-globe"></i> Chia sẻ đề này cho <b>TẤT CẢ</b> người dùng (Admin)</span></label>
             </div>
 
             <div id="pdfExamCreateStatus" style="margin-top:16px; font-size:13px;"></div>
@@ -1254,6 +1276,14 @@ const QuestionManager = {
     this.all = list;
     StorageManager.set(StorageManager.KEYS.QUESTIONS, list);
   },
+  // Được CloudSync gọi realtime khi Admin cập nhật "300 câu gốc" dùng chung —
+  // áp dụng ngay cho MỌI người dùng đang mở app, không cần tải lại trang.
+  applySharedBank(questions){
+    this.all = questions;
+    StorageManager.set(StorageManager.KEYS.QUESTIONS, questions); // cache để dùng offline
+    if(typeof PartsUI !== 'undefined') PartsUI.render();
+    if(typeof DashboardUI !== 'undefined') DashboardUI.render();
+  },
   setPerPart(n){
     this.perPart = n;
     SettingsManager.update({perPart:n});
@@ -1281,46 +1311,188 @@ const QuestionManager = {
 };
 
 /* ============================================================================
-   CUSTOM EXAM MANAGER — quản lý ngân hàng "Đề tự tạo"
-   (tách biệt hoàn toàn với 300 câu hỏi gốc trong QUESTIONS_DATA)
+   CLOUD SYNC — đồng bộ "300 câu gốc" và "Đề tự tạo" qua Firebase
+   - Admin (role:"admin" trong allowedUsers): mọi thứ admin cập nhật được lưu
+     vào các collection DÙNG CHUNG (sharedQuestionBank, sharedCustomExams)
+     → TẤT CẢ user khác thấy ngay lập tức (realtime, không cần tải lại trang).
+   - User thường: đề tự tạo của họ lưu vào collection RIÊNG của chính họ
+     (users/{uid}/customExams) → chỉ mình họ thấy được, dùng được trên mọi
+     thiết bị họ đăng nhập (vì gắn với tài khoản Google, không phải trình duyệt).
    ========================================================================== */
-const CustomExamManager = {
-  KEY: 'examMasterPro_customExams',
-  getAll(){ return StorageManager.get(this.KEY, []); },
-  getById(id){ return this.getAll().find(e=>e.id===id) || null; },
-  saveAll(list){ StorageManager.set(this.KEY, list); },
+const CloudSync = {
+  ready:false,
+  uid:null,
+  email:null,
+  isAdmin:false,
+  sharedExams:[],     // cache realtime của collection sharedCustomExams
+  privateExams:[],    // cache realtime của users/{uid}/customExams
+  unsubscribers:[],
 
-  addFromJson(name, questions){
-    const list = this.getAll();
-    const entry = {
-      id: Utils.uid(), type:'json', name: name || ('Đề JSON '+(list.length+1)),
-      createdAt: new Date().toISOString(),
-      questions, totalQuestions: questions.length
-    };
-    list.unshift(entry);
-    this.saveAll(list);
-    return entry;
+  async init(user, isAdmin){
+    this.uid = user.uid;
+    this.email = (user.email||'').toLowerCase();
+    this.isAdmin = isAdmin;
+    this.ready = false;
+
+    await this.migrateLegacyLocalData();
+
+    // 1) "300 câu gốc" dùng chung — mọi user (kể cả admin) đều LẮNG NGHE để
+    //    tự động nhận bản cập nhật mới nhất từ admin, không cần tải lại trang.
+    this.unsubscribers.push(
+      fbDb.collection('sharedQuestionBank').doc('main').onSnapshot(doc=>{
+        if(doc.exists){
+          const data = doc.data();
+          if(Array.isArray(data.questions) && data.questions.length){
+            QuestionManager.applySharedBank(data.questions);
+          }
+        }
+      }, err=> console.error('Lỗi tải 300 câu gốc dùng chung:', err))
+    );
+
+    // 2) Đề tự tạo DÙNG CHUNG (do admin tạo) — mọi user đều thấy
+    this.unsubscribers.push(
+      fbDb.collection('sharedCustomExams').orderBy('createdAt','desc').onSnapshot(snap=>{
+        this.sharedExams = snap.docs.map(d=>({id:d.id, shared:true, ...d.data()}));
+        this.ready = true;
+        if(typeof CustomExamUI !== 'undefined') CustomExamUI.render();
+      }, err=> console.error('Lỗi tải đề tự tạo dùng chung:', err))
+    );
+
+    // 3) Đề tự tạo RIÊNG của user hiện tại — chỉ chính họ thấy
+    this.unsubscribers.push(
+      fbDb.collection('users').doc(this.uid).collection('customExams').orderBy('createdAt','desc').onSnapshot(snap=>{
+        this.privateExams = snap.docs.map(d=>({id:d.id, shared:false, ...d.data()}));
+        if(typeof CustomExamUI !== 'undefined') CustomExamUI.render();
+      }, err=> console.error('Lỗi tải đề tự tạo riêng:', err))
+    );
   },
 
-  async addFromPdf(name, totalQuestions, numOptions, answerKey, pdfFile){
-    const list = this.getAll();
-    const id = Utils.uid();
-    await IdbStore.set(id, pdfFile);
-    const entry = {
-      id, type:'pdf', name: name || ('Đề PDF '+(list.length+1)),
-      createdAt: new Date().toISOString(),
-      totalQuestions, numOptions, answerKey, pdfName: pdfFile.name
-    };
-    list.unshift(entry);
-    this.saveAll(list);
-    return entry;
+  teardown(){
+    this.unsubscribers.forEach(u=>{ try{ u(); }catch(e){} });
+    this.unsubscribers = [];
+    this.sharedExams = [];
+    this.privateExams = [];
+    this.ready = false;
+  },
+
+  // Di trú dữ liệu "Đề tự tạo" đã lưu cục bộ (trước khi có Firebase) lên
+  // tài khoản Firebase hiện tại — chỉ chạy 1 lần duy nhất cho mỗi tài khoản.
+  async migrateLegacyLocalData(){
+    const MIGRATION_FLAG = 'examMasterPro_legacyMigrated_'+this.uid;
+    if(localStorage.getItem(MIGRATION_FLAG)) return;
+    const legacyList = StorageManager.get('examMasterPro_customExams', []);
+    if(Array.isArray(legacyList) && legacyList.length){
+      for(const item of legacyList){
+        try{
+          if(item.type === 'json'){
+            await this.createPrivateExamJson(item.name, item.questions);
+          } else if(item.type === 'pdf'){
+            const blob = await IdbStore.get(item.id).catch(()=>null);
+            if(blob){
+              await this.createPrivateExamPdf(item.name, item.totalQuestions, item.numOptions, item.answerKey, blob, item.pdfName || (item.name+'.pdf'));
+            }
+          }
+        }catch(e){ console.error('Lỗi di trú đề cũ:', item.name, e); }
+      }
+      UIManager.toast('success','Đã đồng bộ dữ liệu cũ', `${legacyList.length} đề tự tạo trước đây đã được đưa lên tài khoản của bạn`);
+    }
+    localStorage.setItem(MIGRATION_FLAG, '1');
+  },
+
+  // ================= 300 CÂU GỐC (chỉ Admin được ghi) =================
+  async updateSharedQuestionBank(questions){
+    if(!this.isAdmin) throw new Error('Chỉ Admin mới được cập nhật 300 câu hỏi gốc');
+    await fbDb.collection('sharedQuestionBank').doc('main').set({
+      questions, totalQuestions: questions.length,
+      updatedAt: new Date().toISOString(),
+      updatedByEmail: this.email
+    });
+  },
+
+  // ================= ĐỀ TỰ TẠO — JSON =================
+  async createSharedExamJson(name, questions){
+    if(!this.isAdmin) throw new Error('Chỉ Admin mới được tạo đề dùng chung');
+    return fbDb.collection('sharedCustomExams').add({
+      type:'json', name, questions, totalQuestions: questions.length,
+      createdAt: new Date().toISOString(), createdByEmail: this.email
+    });
+  },
+  async createPrivateExamJson(name, questions){
+    return fbDb.collection('users').doc(this.uid).collection('customExams').add({
+      type:'json', name, questions, totalQuestions: questions.length,
+      createdAt: new Date().toISOString(), createdByEmail: this.email
+    });
+  },
+
+  // ================= ĐỀ TỰ TẠO — PDF (file lưu trên Firebase Storage) =================
+  async createSharedExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile){
+    if(!this.isAdmin) throw new Error('Chỉ Admin mới được tạo đề dùng chung');
+    const docRef = fbDb.collection('sharedCustomExams').doc();
+    const path = `sharedPdfs/${docRef.id}.pdf`;
+    const pdfURL = await this.uploadPdf(path, pdfFile);
+    await docRef.set({
+      type:'pdf', name, totalQuestions, numOptions, answerKey,
+      pdfPath: path, pdfURL, pdfName: pdfFile.name || (name+'.pdf'),
+      createdAt: new Date().toISOString(), createdByEmail: this.email
+    });
+    return docRef;
+  },
+  async createPrivateExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile, pdfNameOverride){
+    const colRef = fbDb.collection('users').doc(this.uid).collection('customExams');
+    const docRef = colRef.doc();
+    const path = `userPdfs/${this.uid}/${docRef.id}.pdf`;
+    const pdfURL = await this.uploadPdf(path, pdfFile);
+    await docRef.set({
+      type:'pdf', name, totalQuestions, numOptions, answerKey,
+      pdfPath: path, pdfURL, pdfName: pdfNameOverride || pdfFile.name || (name+'.pdf'),
+      createdAt: new Date().toISOString(), createdByEmail: this.email
+    });
+    return docRef;
+  },
+  async uploadPdf(path, fileOrBlob){
+    const ref = fbStorage.ref().child(path);
+    await ref.put(fileOrBlob, {contentType:'application/pdf'});
+    return ref.getDownloadURL();
+  },
+
+  // ================= XÓA ĐỀ =================
+  async deleteExam(exam){
+    if(exam.shared){
+      if(!this.isAdmin) throw new Error('Chỉ Admin mới được xóa đề dùng chung');
+      if(exam.type === 'pdf' && exam.pdfPath){ try{ await fbStorage.ref().child(exam.pdfPath).delete(); }catch(e){} }
+      await fbDb.collection('sharedCustomExams').doc(exam.id).delete();
+    } else {
+      if(exam.type === 'pdf' && exam.pdfPath){ try{ await fbStorage.ref().child(exam.pdfPath).delete(); }catch(e){} }
+      await fbDb.collection('users').doc(this.uid).collection('customExams').doc(exam.id).delete();
+    }
+  },
+
+  getAllExams(){ return [...this.sharedExams, ...this.privateExams]; },
+  getExamById(id){ return this.sharedExams.find(e=>e.id===id) || this.privateExams.find(e=>e.id===id) || null; }
+};
+
+/* ============================================================================
+   CUSTOM EXAM MANAGER — lớp trung gian mỏng gọi vào CloudSync
+   (giữ cùng tên hàm như bản cũ để các phần khác của app không cần đổi)
+   ========================================================================== */
+const CustomExamManager = {
+  getAll(){ return CloudSync.getAllExams(); },
+  getById(id){ return CloudSync.getExamById(id); },
+
+  async addFromJson(name, questions, shared){
+    return shared ? CloudSync.createSharedExamJson(name, questions)
+                  : CloudSync.createPrivateExamJson(name, questions);
+  },
+
+  async addFromPdf(name, totalQuestions, numOptions, answerKey, pdfFile, shared){
+    return shared ? CloudSync.createSharedExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile)
+                  : CloudSync.createPrivateExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile);
   },
 
   async remove(id){
-    const entry = this.getById(id);
-    const list = this.getAll().filter(e=>e.id!==id);
-    this.saveAll(list);
-    if(entry && entry.type==='pdf'){ try{ await IdbStore.del(id); }catch(e){} }
+    const exam = this.getById(id);
+    if(!exam) return;
+    await CloudSync.deleteExam(exam);
   }
 };
 
@@ -2369,24 +2541,37 @@ const ImportManager = {
       return;
     }
     const reader = new FileReader();
-    reader.onload = (e)=>{
+    reader.onload = async (e)=>{
+      const nameInput = document.getElementById('jsonExamNameInput');
+      const updateBaseCb = document.getElementById('updateBaseBankCheckbox');
+      const shareCb = document.getElementById('shareJsonExamCheckbox');
       try{
         const data = JSON.parse(e.target.result);
         if(!Array.isArray(data)) throw new Error('Dữ liệu phải là một mảng (array) các câu hỏi');
         data.forEach((q,i)=>{
           if(!q.id || !q.question || !q.options || !q.answer) throw new Error(`Câu hỏi tại vị trí ${i+1} thiếu trường bắt buộc (id/question/options/answer)`);
         });
-        const nameInput = document.getElementById('jsonExamNameInput');
         const name = (nameInput.value || '').trim() || file.name.replace(/\.json$/i,'');
-        CustomExamManager.addFromJson(name, data);
-        statusEl.innerHTML = `<span style="color:var(--success);"><i class="fa-solid fa-circle-check"></i> Đã tạo đề "${Utils.escapeHtml(name)}" với ${data.length} câu hỏi trong mục Đề tự tạo!</span>`;
-        UIManager.toast('success','Tạo đề thành công', `"${name}" — ${data.length} câu hỏi (không ảnh hưởng 300 câu gốc)`);
+
+        if(AuthManager.isAdmin() && updateBaseCb && updateBaseCb.checked){
+          statusEl.innerHTML = `<span style="color:var(--text-muted);"><i class="fa-solid fa-spinner fa-spin"></i> Đang cập nhật 300 câu gốc...</span>`;
+          await CloudSync.updateSharedQuestionBank(data);
+          statusEl.innerHTML = `<span style="color:var(--success);"><i class="fa-solid fa-circle-check"></i> Đã cập nhật ${data.length} câu vào 300 câu GỐC — áp dụng ngay cho TẤT CẢ người dùng!</span>`;
+          UIManager.toast('success','Đã cập nhật 300 câu gốc', `${data.length} câu hỏi — mọi người dùng sẽ tự động thấy thay đổi`);
+        } else {
+          const isShared = !!(AuthManager.isAdmin() && shareCb && shareCb.checked);
+          statusEl.innerHTML = `<span style="color:var(--text-muted);"><i class="fa-solid fa-spinner fa-spin"></i> Đang tạo đề...</span>`;
+          await CustomExamManager.addFromJson(name, data, isShared);
+          statusEl.innerHTML = `<span style="color:var(--success);"><i class="fa-solid fa-circle-check"></i> Đã tạo đề "${Utils.escapeHtml(name)}" với ${data.length} câu hỏi trong mục Đề tự tạo!</span>`;
+          UIManager.toast('success','Tạo đề thành công', isShared ? `"${name}" — dùng chung cho TẤT CẢ người dùng` : `"${name}" — riêng của bạn (${data.length} câu)`);
+        }
         nameInput.value = '';
         document.getElementById('fileInput').value = '';
-        CustomExamUI.render();
+        if(updateBaseCb) updateBaseCb.checked = false;
+        if(shareCb) shareCb.checked = false;
       }catch(err){
         statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> Lỗi: ${Utils.escapeHtml(err.message)}</span>`;
-        UIManager.toast('error','Import thất bại', err.message);
+        UIManager.toast('error','Thao tác thất bại', err.message);
       }
     };
     reader.readAsText(file, 'UTF-8');
@@ -2420,6 +2605,16 @@ const CustomExamUI = {
 
     document.getElementById('downloadTemplateBtn').addEventListener('click', ()=>this.downloadTemplate());
     document.getElementById('createPdfExamBtn').addEventListener('click', ()=>this.createPdfExam());
+
+    this.applyRoleUI(AuthManager.isAdmin());
+  },
+
+  // Hiện/ẩn các tùy chọn chỉ dành riêng cho Admin (chia sẻ đề, cập nhật 300 câu gốc)
+  applyRoleUI(isAdmin){
+    const jsonBlock = document.getElementById('jsonAdminOptions');
+    const pdfBlock = document.getElementById('pdfAdminOptions');
+    if(jsonBlock) jsonBlock.style.display = isAdmin ? 'flex' : 'none';
+    if(pdfBlock) pdfBlock.style.display = isAdmin ? 'flex' : 'none';
   },
 
   render(){
@@ -2427,17 +2622,20 @@ const CustomExamUI = {
     document.getElementById('customExamEmptyState').style.display = list.length ? 'none' : 'block';
     document.getElementById('customExamGrid').innerHTML = list.map(e=>{
       const isJson = e.type === 'json';
+      const canManage = e.shared ? AuthManager.isAdmin() : true;
+      const ownerLabel = e.shared ? '<i class="fa-solid fa-globe"></i> Dùng chung (mọi người thấy)' : '<i class="fa-solid fa-lock"></i> Riêng của bạn';
       return `<div class="card custom-exam-card">
         <div class="part-top">
           <span class="part-name">${Utils.escapeHtml(e.name)}</span>
           <span class="exam-type-badge ${e.type}">${isJson ? 'JSON' : 'PDF'}</span>
         </div>
-        <div class="part-meta"><span>${e.totalQuestions} câu</span><span>${new Date(e.createdAt).toLocaleDateString('vi-VN')}</span></div>
+        <div class="part-meta"><span>${e.totalQuestions} câu</span><span>${e.createdAt ? new Date(e.createdAt).toLocaleDateString('vi-VN') : ''}</span></div>
+        <div class="part-meta"><span class="${e.shared ? 'exam-owner-shared' : 'exam-owner-private'}">${ownerLabel}</span></div>
         ${!isJson ? `<div class="part-meta"><span><i class="fa-solid fa-stopwatch"></i> Giờ làm bài: ${Utils.formatSecToClock(e.totalQuestions*90)}</span></div>` : ''}
         <div class="ce-card-actions">
           <button class="btn btn-primary btn-sm" onclick="${isJson ? `QuizManager.startCustomExam('${e.id}')` : `PdfExamManager.start('${e.id}')`}"><i class="fa-solid fa-play"></i> Làm bài</button>
           ${!isJson ? `<button class="btn btn-outline btn-sm" onclick="CustomExamUI.viewPdf('${e.id}')"><i class="fa-solid fa-eye"></i> Xem PDF</button>` : ''}
-          <button class="btn btn-ghost btn-sm" onclick="CustomExamUI.confirmDelete('${e.id}')"><i class="fa-solid fa-trash"></i> Xóa</button>
+          ${canManage ? `<button class="btn btn-ghost btn-sm" onclick="CustomExamUI.confirmDelete('${e.id}')"><i class="fa-solid fa-trash"></i> Xóa</button>` : ''}
         </div>
       </div>`;
     }).join('');
@@ -2447,20 +2645,25 @@ const CustomExamUI = {
     const exam = CustomExamManager.getById(id);
     if(!exam) return;
     try{
+      if(exam.pdfURL){ window.open(exam.pdfURL, '_blank'); return; }
+      // Dự phòng cho đề cũ được tạo trước khi bật Firebase (lưu cục bộ trong trình duyệt)
       const blob = await IdbStore.get(id);
       if(!blob){ UIManager.toast('error','Không tìm thấy file','File PDF của đề này không còn trong bộ nhớ trình duyệt'); return; }
-      const url = URL.createObjectURL(blob);
-      window.open(url, '_blank');
+      window.open(URL.createObjectURL(blob), '_blank');
     }catch(err){ UIManager.toast('error','Lỗi', err.message); }
   },
 
   confirmDelete(id){
     const exam = CustomExamManager.getById(id);
     if(!exam) return;
-    UIManager.confirm('Xóa đề này?', `Đề "${exam.name}" sẽ bị xóa vĩnh viễn, không thể hoàn tác.`, async ()=>{
-      await CustomExamManager.remove(id);
-      UIManager.toast('success','Đã xóa', `Đề "${exam.name}" đã được xóa`);
-      this.render();
+    if(exam.shared && !AuthManager.isAdmin()){
+      UIManager.toast('error','Không có quyền','Chỉ Admin mới được xóa đề dùng chung'); return;
+    }
+    UIManager.confirm('Xóa đề này?', `Đề "${exam.name}" sẽ bị xóa vĩnh viễn${exam.shared ? ' cho TẤT CẢ người dùng' : ''}, không thể hoàn tác.`, async ()=>{
+      try{
+        await CustomExamManager.remove(id);
+        UIManager.toast('success','Đã xóa', `Đề "${exam.name}" đã được xóa`);
+      }catch(err){ UIManager.toast('error','Xóa thất bại', err.message); }
     });
   },
 
@@ -2543,22 +2746,35 @@ const CustomExamUI = {
     const name = (nameInput.value || '').trim() || this.pendingPdfFile.name.replace(/\.pdf$/i,'');
     const numOptions = parseInt(document.getElementById('pdfExamOptCountSelect').value, 10);
     const total = this.pendingAnswerCount;
-    const entry = await CustomExamManager.addFromPdf(name, total, numOptions, this.pendingAnswerKey, this.pendingPdfFile);
+    const shareCb = document.getElementById('sharePdfExamCheckbox');
+    const isShared = !!(AuthManager.isAdmin() && shareCb && shareCb.checked);
 
-    UIManager.toast('success','Tạo đề thành công', `"${entry.name}" — ${total} câu, giờ làm bài: ${Utils.formatSecToClock(total*90)}`);
+    const statusEl = document.getElementById('pdfExamCreateStatus');
+    const btn = document.getElementById('createPdfExamBtn');
+    btn.disabled = true;
+    statusEl.innerHTML = `<span style="color:var(--text-muted);"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải file PDF lên và tạo đề, vui lòng đợi...</span>`;
 
-    this.pendingPdfFile = null;
-    this.pendingAnswerKey = null;
-    this.pendingAnswerCount = 0;
-    nameInput.value = '';
-    document.getElementById('pdfExamCountInput').value = 50;
-    document.getElementById('pdfFileInput').value = '';
-    document.getElementById('excelFileInput').value = '';
-    document.getElementById('pdfDropzoneLabel').textContent = 'Kéo thả hoặc bấm để chọn file PDF đề thi';
-    document.getElementById('excelDropzoneLabel').textContent = 'Kéo thả hoặc bấm để chọn file Excel đáp án đã điền';
-    document.getElementById('pdfExamCreateStatus').innerHTML = '';
+    try{
+      await CustomExamManager.addFromPdf(name, total, numOptions, this.pendingAnswerKey, this.pendingPdfFile, isShared);
+      UIManager.toast('success','Tạo đề thành công', isShared ? `"${name}" — dùng chung cho TẤT CẢ người dùng` : `"${name}" — riêng của bạn (${total} câu, giờ làm bài: ${Utils.formatSecToClock(total*90)})`);
+
+      this.pendingPdfFile = null;
+      this.pendingAnswerKey = null;
+      this.pendingAnswerCount = 0;
+      nameInput.value = '';
+      document.getElementById('pdfExamCountInput').value = 50;
+      document.getElementById('pdfFileInput').value = '';
+      document.getElementById('excelFileInput').value = '';
+      if(shareCb) shareCb.checked = false;
+      document.getElementById('pdfDropzoneLabel').textContent = 'Kéo thả hoặc bấm để chọn file PDF đề thi';
+      document.getElementById('excelDropzoneLabel').textContent = 'Kéo thả hoặc bấm để chọn file Excel đáp án đã điền';
+      statusEl.innerHTML = '';
+      this.render();
+    }catch(err){
+      statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> Lỗi: ${Utils.escapeHtml(err.message)}</span>`;
+      UIManager.toast('error','Tạo đề thất bại', err.message);
+    }
     this.updateCreateButtonState();
-    this.render();
   }
 };
 
@@ -2586,21 +2802,28 @@ const PdfExamManager = {
   },
 
   cleanupUrl(){
-    if(this.state && this.state.pdfUrl){ URL.revokeObjectURL(this.state.pdfUrl); }
+    if(this.state && this.state.isBlobUrl && this.state.pdfUrl){ URL.revokeObjectURL(this.state.pdfUrl); }
   },
 
   async start(examId){
     const exam = CustomExamManager.getById(examId);
     if(!exam || exam.type!=='pdf'){ UIManager.toast('error','Không tìm thấy đề','Đề PDF không tồn tại hoặc không hợp lệ'); return; }
-    let blob;
-    try{ blob = await IdbStore.get(examId); }
-    catch(err){ UIManager.toast('error','Lỗi đọc file', err.message); return; }
-    if(!blob){ UIManager.toast('error','Không tìm thấy file PDF','File PDF của đề này không còn trong bộ nhớ trình duyệt'); return; }
+
+    let pdfUrl = exam.pdfURL || null;
+    let isBlobUrl = false;
+    if(!pdfUrl){
+      // Dự phòng cho đề cũ được tạo trước khi bật Firebase (lưu cục bộ trong trình duyệt)
+      let blob;
+      try{ blob = await IdbStore.get(examId); }
+      catch(err){ UIManager.toast('error','Lỗi đọc file', err.message); return; }
+      if(!blob){ UIManager.toast('error','Không tìm thấy file PDF','File PDF của đề này không còn trong bộ nhớ trình duyệt'); return; }
+      pdfUrl = URL.createObjectURL(blob);
+      isBlobUrl = true;
+    }
 
     this.cleanupUrl();
-    const pdfUrl = URL.createObjectURL(blob);
     const totalSeconds = exam.totalQuestions * 90;
-    this.state = { exam, answers:{}, pdfUrl, totalSeconds, timeLeft: totalSeconds, startTime: Date.now(), finished:false };
+    this.state = { exam, answers:{}, pdfUrl, isBlobUrl, totalSeconds, timeLeft: totalSeconds, startTime: Date.now(), finished:false };
 
     document.getElementById('pdfExamActiveArea').style.display = 'block';
     document.getElementById('pdfExamResultArea').style.display = 'none';
@@ -2812,6 +3035,7 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const fbAuth = firebase.auth();
 const fbDb = firebase.firestore();
+const fbStorage = firebase.storage();
 const googleProvider = new firebase.auth.GoogleAuthProvider();
 
 // Số phút không thao tác thì tự động đăng xuất
@@ -2820,7 +3044,10 @@ const IDLE_TIMEOUT_MINUTES = 10;
 
 const AuthManager = {
   currentUser: null,
+  currentRole: 'user',
   _idleTimer: null,
+
+  isAdmin(){ return this.currentRole === 'admin'; },
 
   init(){
     document.getElementById('googleSignInBtn').addEventListener('click', ()=>this.signIn());
@@ -2899,6 +3126,8 @@ const AuthManager = {
     fbDb.collection('allowedUsers').doc(user.email.toLowerCase()).get()
       .then(doc=>{
         if(doc.exists && doc.data().allowed === true){
+          // Field "role" quản lý trong Firestore: "admin" hoặc "user" (mặc định "user")
+          this.currentRole = (doc.data().role === 'admin') ? 'admin' : 'user';
           this.grantAccess(user);
         } else {
           this.denyAccess(user);
@@ -2916,6 +3145,8 @@ const AuthManager = {
     badge.style.display = 'flex';
     document.getElementById('userBadgeAvatar').src = user.photoURL || '';
     document.getElementById('userBadgeName').textContent = user.displayName || user.email;
+    const adminBadge = document.getElementById('adminBadge');
+    if(adminBadge) adminBadge.style.display = this.isAdmin() ? 'inline-flex' : 'none';
 
     // Bắt đầu (hoặc reset) bộ đếm tự động đăng xuất khi không thao tác
     this.startIdleWatcher();
@@ -2925,6 +3156,7 @@ const AuthManager = {
       document.getElementById('loadingOverlay').style.display = 'flex';
       document.getElementById('loadingOverlay').style.opacity = '1';
       App.init();
+      CloudSync.init(user, this.isAdmin());
     }
   },
 
@@ -2944,6 +3176,7 @@ const AuthManager = {
   },
   doSignOut(){
     this.stopIdleWatcher();
+    CloudSync.teardown();
     fbAuth.signOut().then(()=> location.reload());
   }
 };
