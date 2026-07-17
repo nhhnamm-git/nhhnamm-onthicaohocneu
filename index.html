@@ -14,7 +14,9 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-storage-compat.js"></script>
+<!-- ĐÃ BỎ Firebase Storage: file PDF được mã hoá base64 và lưu thẳng trong Firestore
+     (collection sharedCustomExams / users/{uid}/customExams) nên KHÔNG cần bật Storage
+     và KHÔNG cần Storage Rules (Bước D cũ). -->
 
 
 <style>
@@ -1424,45 +1426,75 @@ const CloudSync = {
     });
   },
 
-  // ================= ĐỀ TỰ TẠO — PDF (file lưu trên Firebase Storage) =================
+  // ================= ĐỀ TỰ TẠO — PDF (KHÔNG dùng Firebase Storage) =================
+  // File PDF được đọc thành chuỗi base64 và lưu THẲNG vào field "pdfBase64" trong
+  // document Firestore — nên không cần bật Storage, không cần Storage Rules (Bước D cũ).
+  // Giới hạn: Firestore giới hạn 1 document ~1MB, base64 làm file "phình" thêm ~33%,
+  // nên ta chỉ cho phép file PDF gốc tối đa MAX_PDF_BYTES để chắc chắn còn dư chỗ.
+  MAX_PDF_BYTES: 700 * 1024, // ~700KB
+
+  async fileToBase64(fileOrBlob){
+    return new Promise((resolve, reject)=>{
+      const reader = new FileReader();
+      reader.onload = ()=>{
+        const result = reader.result || '';
+        const commaIdx = result.indexOf(',');
+        resolve(commaIdx >= 0 ? result.slice(commaIdx+1) : result);
+      };
+      reader.onerror = ()=> reject(new Error('Không đọc được file PDF'));
+      reader.readAsDataURL(fileOrBlob);
+    });
+  },
+
+  checkPdfSize(fileOrBlob){
+    const size = fileOrBlob.size || 0;
+    if(size > this.MAX_PDF_BYTES){
+      const maxKb = Math.floor(this.MAX_PDF_BYTES/1024);
+      const fileKb = Math.ceil(size/1024);
+      throw new Error(`File PDF quá lớn (${fileKb}KB). Vì không dùng Firebase Storage nên chỉ chấp nhận PDF tối đa ~${maxKb}KB. Hãy nén PDF bớt (ví dụ dùng ilovepdf.com/compress_pdf hoặc smallpdf.com) rồi tải lại.`);
+    }
+  },
+
   async createSharedExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile){
     if(!this.isAdmin) throw new Error('Chỉ Admin mới được tạo đề dùng chung');
+    this.checkPdfSize(pdfFile);
+    const pdfBase64 = await this.fileToBase64(pdfFile);
     const docRef = fbDb.collection('sharedCustomExams').doc();
-    const path = `sharedPdfs/${docRef.id}.pdf`;
-    const pdfURL = await this.uploadPdf(path, pdfFile);
     await docRef.set({
       type:'pdf', name, totalQuestions, numOptions, answerKey,
-      pdfPath: path, pdfURL, pdfName: pdfFile.name || (name+'.pdf'),
+      pdfBase64, pdfName: pdfFile.name || (name+'.pdf'),
       createdAt: new Date().toISOString(), createdByEmail: this.email
     });
     return docRef;
   },
   async createPrivateExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile, pdfNameOverride){
+    this.checkPdfSize(pdfFile);
+    const pdfBase64 = await this.fileToBase64(pdfFile);
     const colRef = fbDb.collection('users').doc(this.uid).collection('customExams');
     const docRef = colRef.doc();
-    const path = `userPdfs/${this.uid}/${docRef.id}.pdf`;
-    const pdfURL = await this.uploadPdf(path, pdfFile);
     await docRef.set({
       type:'pdf', name, totalQuestions, numOptions, answerKey,
-      pdfPath: path, pdfURL, pdfName: pdfNameOverride || pdfFile.name || (name+'.pdf'),
+      pdfBase64, pdfName: pdfNameOverride || pdfFile.name || (name+'.pdf'),
       createdAt: new Date().toISOString(), createdByEmail: this.email
     });
     return docRef;
   },
-  async uploadPdf(path, fileOrBlob){
-    const ref = fbStorage.ref().child(path);
-    await ref.put(fileOrBlob, {contentType:'application/pdf'});
-    return ref.getDownloadURL();
+
+  // Chuyển base64 đã lưu trong Firestore trở lại thành Blob URL để xem/làm bài
+  base64ToBlobUrl(base64){
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
+    const blob = new Blob([bytes], {type:'application/pdf'});
+    return URL.createObjectURL(blob);
   },
 
   // ================= XÓA ĐỀ =================
   async deleteExam(exam){
     if(exam.shared){
       if(!this.isAdmin) throw new Error('Chỉ Admin mới được xóa đề dùng chung');
-      if(exam.type === 'pdf' && exam.pdfPath){ try{ await fbStorage.ref().child(exam.pdfPath).delete(); }catch(e){} }
       await fbDb.collection('sharedCustomExams').doc(exam.id).delete();
     } else {
-      if(exam.type === 'pdf' && exam.pdfPath){ try{ await fbStorage.ref().child(exam.pdfPath).delete(); }catch(e){} }
       await fbDb.collection('users').doc(this.uid).collection('customExams').doc(exam.id).delete();
     }
   },
@@ -2645,7 +2677,8 @@ const CustomExamUI = {
     const exam = CustomExamManager.getById(id);
     if(!exam) return;
     try{
-      if(exam.pdfURL){ window.open(exam.pdfURL, '_blank'); return; }
+      if(exam.pdfBase64){ window.open(CloudSync.base64ToBlobUrl(exam.pdfBase64), '_blank'); return; }
+      if(exam.pdfURL){ window.open(exam.pdfURL, '_blank'); return; } // đề cũ (bản có Storage)
       // Dự phòng cho đề cũ được tạo trước khi bật Firebase (lưu cục bộ trong trình duyệt)
       const blob = await IdbStore.get(id);
       if(!blob){ UIManager.toast('error','Không tìm thấy file','File PDF của đề này không còn trong bộ nhớ trình duyệt'); return; }
@@ -2671,6 +2704,12 @@ const CustomExamUI = {
     const statusEl = document.getElementById('pdfExamCreateStatus');
     if(!file.name.toLowerCase().endsWith('.pdf')){
       statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File phải có định dạng .pdf</span>`;
+      return;
+    }
+    if(file.size > CloudSync.MAX_PDF_BYTES){
+      const maxKb = Math.floor(CloudSync.MAX_PDF_BYTES/1024);
+      const fileKb = Math.ceil(file.size/1024);
+      statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File quá lớn (${fileKb}KB, tối đa ~${maxKb}KB vì không dùng Firebase Storage). Hãy nén PDF ở ilovepdf.com/compress_pdf rồi thử lại.</span>`;
       return;
     }
     this.pendingPdfFile = file;
@@ -2809,9 +2848,14 @@ const PdfExamManager = {
     const exam = CustomExamManager.getById(examId);
     if(!exam || exam.type!=='pdf'){ UIManager.toast('error','Không tìm thấy đề','Đề PDF không tồn tại hoặc không hợp lệ'); return; }
 
-    let pdfUrl = exam.pdfURL || null;
+    let pdfUrl = null;
     let isBlobUrl = false;
-    if(!pdfUrl){
+    if(exam.pdfBase64){
+      pdfUrl = CloudSync.base64ToBlobUrl(exam.pdfBase64);
+      isBlobUrl = true;
+    } else if(exam.pdfURL){
+      pdfUrl = exam.pdfURL; // đề cũ (bản có Storage)
+    } else {
       // Dự phòng cho đề cũ được tạo trước khi bật Firebase (lưu cục bộ trong trình duyệt)
       let blob;
       try{ blob = await IdbStore.get(examId); }
@@ -3035,7 +3079,8 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const fbAuth = firebase.auth();
 const fbDb = firebase.firestore();
-const fbStorage = firebase.storage();
+// KHÔNG khởi tạo firebase.storage() nữa — toàn bộ app (kể cả PDF đề tự tạo)
+// giờ chỉ dùng Firestore, không cần bật/khai báo Firebase Storage.
 const googleProvider = new firebase.auth.GoogleAuthProvider();
 
 // Số phút không thao tác thì tự động đăng xuất
