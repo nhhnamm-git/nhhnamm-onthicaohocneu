@@ -14,9 +14,11 @@
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
-<!-- ĐÃ BỎ Firebase Storage: file PDF được mã hoá base64 và lưu thẳng trong Firestore
+<!-- ĐÃ BỎ Firebase Storage: file PDF được mã hoá base64 và lưu trong Firestore
      (collection sharedCustomExams / users/{uid}/customExams) nên KHÔNG cần bật Storage
-     và KHÔNG cần Storage Rules (Bước D cũ). -->
+     và KHÔNG cần Storage Rules (Bước D cũ). Vì 1 document Firestore chỉ chứa tối đa
+     ~1MB, file PDF lớn được TỰ ĐỘNG CHIA NHỎ thành nhiều "chunk" base64 và lưu trong
+     subcollection pdfChunks bên dưới mỗi document đề thi, rồi ghép lại khi xem/làm bài. -->
 
 
 <style>
@@ -1427,11 +1429,16 @@ const CloudSync = {
   },
 
   // ================= ĐỀ TỰ TẠO — PDF (KHÔNG dùng Firebase Storage) =================
-  // File PDF được đọc thành chuỗi base64 và lưu THẲNG vào field "pdfBase64" trong
-  // document Firestore — nên không cần bật Storage, không cần Storage Rules (Bước D cũ).
-  // Giới hạn: Firestore giới hạn 1 document ~1MB, base64 làm file "phình" thêm ~33%,
-  // nên ta chỉ cho phép file PDF gốc tối đa MAX_PDF_BYTES để chắc chắn còn dư chỗ.
-  MAX_PDF_BYTES: 700 * 1024, // ~700KB
+  // File PDF được đọc thành base64 và lưu trong Firestore — không cần bật Storage,
+  // không cần Storage Rules (Bước D cũ).
+  // Giới hạn của Firestore: 1 document chỉ chứa tối đa ~1MB. Để vượt qua giới hạn này
+  // mà KHÔNG cần Storage, file PDF được TỰ ĐỘNG CHIA thành nhiều "chunk" nhỏ
+  // (mỗi chunk ~CHUNK_RAW_BYTES byte gốc, base64 hoá riêng từng chunk) và lưu vào
+  // subcollection "pdfChunks" bên dưới document đề thi. Khi xem/làm bài, các chunk
+  // được tải lại đúng thứ tự rồi ghép thành file PDF gốc.
+  // => Nhờ vậy tổng dung lượng PDF cho phép lớn hơn NHIỀU lần so với 1 document đơn lẻ.
+  CHUNK_RAW_BYTES: 700 * 1024,      // ~700KB gốc mỗi chunk (base64 hoá ~933KB, còn dư chỗ trong giới hạn 1MB/document)
+  MAX_PDF_BYTES: 20 * 1024 * 1024,  // ~20MB — đủ lớn cho hầu hết đề thi PDF scan, không cần Storage
 
   async fileToBase64(fileOrBlob){
     return new Promise((resolve, reject)=>{
@@ -1449,35 +1456,97 @@ const CloudSync = {
   checkPdfSize(fileOrBlob){
     const size = fileOrBlob.size || 0;
     if(size > this.MAX_PDF_BYTES){
-      const maxKb = Math.floor(this.MAX_PDF_BYTES/1024);
-      const fileKb = Math.ceil(size/1024);
-      throw new Error(`File PDF quá lớn (${fileKb}KB). Vì không dùng Firebase Storage nên chỉ chấp nhận PDF tối đa ~${maxKb}KB. Hãy nén PDF bớt (ví dụ dùng ilovepdf.com/compress_pdf hoặc smallpdf.com) rồi tải lại.`);
+      const maxMb = (this.MAX_PDF_BYTES/(1024*1024)).toFixed(0);
+      const fileMb = (size/(1024*1024)).toFixed(1);
+      throw new Error(`File PDF quá lớn (${fileMb}MB). Vì không dùng Firebase Storage nên chỉ chấp nhận PDF tối đa ~${maxMb}MB. Hãy nén PDF bớt (ví dụ dùng ilovepdf.com/compress_pdf hoặc smallpdf.com) rồi tải lại.`);
     }
+  },
+
+  // Chia file PDF thành nhiều Blob con (mỗi Blob <= CHUNK_RAW_BYTES byte gốc),
+  // base64 hoá riêng từng phần rồi ghi vào subcollection "pdfChunks" của docRef.
+  // Ghi song song (Promise.all) để tạo đề nhanh hơn với file nhiều chunk.
+  async savePdfChunks(docRef, pdfFile){
+    const chunkSize = this.CHUNK_RAW_BYTES;
+    const total = pdfFile.size;
+    const chunkCount = Math.max(1, Math.ceil(total / chunkSize));
+    const writes = [];
+    for(let i=0;i<chunkCount;i++){
+      const start = i*chunkSize;
+      const end = Math.min(total, start+chunkSize);
+      const slice = pdfFile.slice(start, end);
+      writes.push(
+        this.fileToBase64(slice).then(data=>
+          docRef.collection('pdfChunks').doc(String(i)).set({ index:i, data })
+        )
+      );
+    }
+    await Promise.all(writes);
+    return chunkCount;
+  },
+
+  // Tải lại toàn bộ chunk của 1 document đề thi, ghép đúng thứ tự thành file PDF gốc.
+  async loadPdfChunks(docRef){
+    const snap = await docRef.collection('pdfChunks').orderBy('index','asc').get();
+    if(snap.empty) throw new Error('Không tìm thấy dữ liệu file PDF (chunks) trong Firestore');
+    const partsBytes = snap.docs.map(d=>{
+      const binary = atob(d.data().data);
+      const bytes = new Uint8Array(binary.length);
+      for(let i=0;i<binary.length;i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    });
+    return new Blob(partsBytes, {type:'application/pdf'});
+  },
+
+  // Trả về đúng collection reference chứa document của 1 đề thi (dùng chung / riêng)
+  examDocRef(exam){
+    return exam.shared
+      ? fbDb.collection('sharedCustomExams').doc(exam.id)
+      : fbDb.collection('users').doc(this.uid).collection('customExams').doc(exam.id);
+  },
+
+  // Trả về Blob URL để xem/làm bài — tự nhận diện đề PDF chia chunk (mới) hay
+  // đề PDF base64 lưu 1 field duy nhất (đề cũ, file nhỏ, vẫn tương thích ngược).
+  async getPdfBlobUrl(exam){
+    if(exam.pdfChunked){
+      const blob = await this.loadPdfChunks(this.examDocRef(exam));
+      return URL.createObjectURL(blob);
+    }
+    if(exam.pdfBase64){
+      return this.base64ToBlobUrl(exam.pdfBase64);
+    }
+    return null;
   },
 
   async createSharedExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile){
     if(!this.isAdmin) throw new Error('Chỉ Admin mới được tạo đề dùng chung');
     this.checkPdfSize(pdfFile);
-    const pdfBase64 = await this.fileToBase64(pdfFile);
     const docRef = fbDb.collection('sharedCustomExams').doc();
-    await docRef.set({
-      type:'pdf', name, totalQuestions, numOptions, answerKey,
-      pdfBase64, pdfName: pdfFile.name || (name+'.pdf'),
-      createdAt: new Date().toISOString(), createdByEmail: this.email
-    });
+    await this.writeExamPdfDoc(docRef, name, totalQuestions, numOptions, answerKey, pdfFile);
     return docRef;
   },
   async createPrivateExamPdf(name, totalQuestions, numOptions, answerKey, pdfFile, pdfNameOverride){
     this.checkPdfSize(pdfFile);
-    const pdfBase64 = await this.fileToBase64(pdfFile);
     const colRef = fbDb.collection('users').doc(this.uid).collection('customExams');
     const docRef = colRef.doc();
-    await docRef.set({
-      type:'pdf', name, totalQuestions, numOptions, answerKey,
-      pdfBase64, pdfName: pdfNameOverride || pdfFile.name || (name+'.pdf'),
-      createdAt: new Date().toISOString(), createdByEmail: this.email
-    });
+    await this.writeExamPdfDoc(docRef, name, totalQuestions, numOptions, answerKey, pdfFile, pdfNameOverride);
     return docRef;
+  },
+
+  // Ghi document đề thi PDF: file nhỏ (<= 1 chunk) lưu thẳng field pdfBase64 như cũ
+  // để đơn giản/nhanh; file lớn hơn thì chia chunk và lưu subcollection pdfChunks.
+  async writeExamPdfDoc(docRef, name, totalQuestions, numOptions, answerKey, pdfFile, pdfNameOverride){
+    const pdfName = pdfNameOverride || pdfFile.name || (name+'.pdf');
+    const baseDoc = {
+      type:'pdf', name, totalQuestions, numOptions, answerKey, pdfName,
+      createdAt: new Date().toISOString(), createdByEmail: this.email
+    };
+    if(pdfFile.size <= this.CHUNK_RAW_BYTES){
+      const pdfBase64 = await this.fileToBase64(pdfFile);
+      await docRef.set({ ...baseDoc, pdfBase64 });
+    } else {
+      await docRef.set({ ...baseDoc, pdfChunked:true, pdfTotalBytes: pdfFile.size });
+      await this.savePdfChunks(docRef, pdfFile);
+    }
   },
 
   // Chuyển base64 đã lưu trong Firestore trở lại thành Blob URL để xem/làm bài
@@ -1491,12 +1560,17 @@ const CloudSync = {
 
   // ================= XÓA ĐỀ =================
   async deleteExam(exam){
-    if(exam.shared){
-      if(!this.isAdmin) throw new Error('Chỉ Admin mới được xóa đề dùng chung');
-      await fbDb.collection('sharedCustomExams').doc(exam.id).delete();
-    } else {
-      await fbDb.collection('users').doc(this.uid).collection('customExams').doc(exam.id).delete();
+    if(exam.shared && !this.isAdmin) throw new Error('Chỉ Admin mới được xóa đề dùng chung');
+    const docRef = this.examDocRef(exam);
+    if(exam.pdfChunked){
+      // Xoá hết subcollection pdfChunks trước khi xoá document chính (Firestore
+      // không tự xoá subcollection khi xoá document cha).
+      try{
+        const snap = await docRef.collection('pdfChunks').get();
+        await Promise.all(snap.docs.map(d=>d.ref.delete()));
+      }catch(e){ console.error('Lỗi xoá pdfChunks:', e); }
     }
+    await docRef.delete();
   },
 
   getAllExams(){ return [...this.sharedExams, ...this.privateExams]; },
@@ -2677,7 +2751,10 @@ const CustomExamUI = {
     const exam = CustomExamManager.getById(id);
     if(!exam) return;
     try{
-      if(exam.pdfBase64){ window.open(CloudSync.base64ToBlobUrl(exam.pdfBase64), '_blank'); return; }
+      if(exam.pdfBase64 || exam.pdfChunked){
+        const url = await CloudSync.getPdfBlobUrl(exam);
+        if(url){ window.open(url, '_blank'); return; }
+      }
       if(exam.pdfURL){ window.open(exam.pdfURL, '_blank'); return; } // đề cũ (bản có Storage)
       // Dự phòng cho đề cũ được tạo trước khi bật Firebase (lưu cục bộ trong trình duyệt)
       const blob = await IdbStore.get(id);
@@ -2707,9 +2784,9 @@ const CustomExamUI = {
       return;
     }
     if(file.size > CloudSync.MAX_PDF_BYTES){
-      const maxKb = Math.floor(CloudSync.MAX_PDF_BYTES/1024);
-      const fileKb = Math.ceil(file.size/1024);
-      statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File quá lớn (${fileKb}KB, tối đa ~${maxKb}KB vì không dùng Firebase Storage). Hãy nén PDF ở ilovepdf.com/compress_pdf rồi thử lại.</span>`;
+      const maxMb = (CloudSync.MAX_PDF_BYTES/(1024*1024)).toFixed(0);
+      const fileMb = (file.size/(1024*1024)).toFixed(1);
+      statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File quá lớn (${fileMb}MB, tối đa ~${maxMb}MB vì không dùng Firebase Storage). Hãy nén PDF ở ilovepdf.com/compress_pdf rồi thử lại.</span>`;
       return;
     }
     this.pendingPdfFile = file;
@@ -2850,8 +2927,9 @@ const PdfExamManager = {
 
     let pdfUrl = null;
     let isBlobUrl = false;
-    if(exam.pdfBase64){
-      pdfUrl = CloudSync.base64ToBlobUrl(exam.pdfBase64);
+    if(exam.pdfBase64 || exam.pdfChunked){
+      try{ pdfUrl = await CloudSync.getPdfBlobUrl(exam); }
+      catch(err){ UIManager.toast('error','Lỗi đọc file PDF', err.message); return; }
       isBlobUrl = true;
     } else if(exam.pdfURL){
       pdfUrl = exam.pdfURL; // đề cũ (bản có Storage)
