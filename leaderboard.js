@@ -141,7 +141,7 @@
                 const btn = document.createElement('button');
                 btn.className = 'nav-item';
                 btn.dataset.view = 'halloffame';
-                btn.innerHTML = '<i class="fa-solid fa-crown" style="color: #fbbf24;"></i> Hall Of Fame';
+                btn.innerHTML = '<i class="fa-solid fa-crown"></i> Thứ hạng';
                 
                 // Navigate Hook logic
                 btn.addEventListener('click', () => UIManager.navigate('halloffame'));
@@ -177,7 +177,7 @@
                 section.innerHTML = `
                     <div class="section-head">
                         <div>
-                            <h2>👑 Hall Of Fame</h2>
+                            <h2>Thứ hạng</h2>
                             <p>Bảng xếp hạng toàn diện của toàn bộ học viên.</p>
                         </div>
                     </div>
