@@ -254,8 +254,14 @@
   document.body.insertAdjacentHTML('beforeend', chatbotUI);
 
   // 2. LOGIC XỬ LÝ API GEMINI VÀ UI CHATBOT
-  const GEMINI_API_KEY = "AQ.Ab8RN6JuV9JY82ak9vpLQIN1n2VbMMJ5krNNKUXe-3far2fU1A"; 
-  const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.5-flash-lite"];
+  // ⚠️ QUAN TRỌNG: Giá trị bên dưới KHÔNG phải là API Key hợp lệ của Gemini.
+  // Key hợp lệ luôn có dạng "AIzaSy..." (lấy tại https://aistudio.google.com/apikey).
+  // Key cũ bắt đầu bằng "AQ." trông giống 1 access token/chuỗi bị cắt, không phải API key,
+  // nên Google trả về lỗi "invalid authentication credentials" như trong ảnh báo lỗi.
+  // => Hãy thay chuỗi dưới đây bằng API key thật của bạn.
+  const GEMINI_API_KEY = "AQ.Ab8RN6KxoM-6q8kSdJUI45KAaV1FqkUnQ5LKOz-_-Oww9-GlVQ";
+  // "gemini-3.5-flash-lite" không tồn tại → luôn trả 404. Model lite hợp lệ hiện tại là "gemini-3.1-flash-lite".
+  const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
 
   const widgetContainer = document.getElementById('ai-widget-container');
   const chatWindow = document.getElementById('bot-chat-window');
@@ -348,10 +354,10 @@
           botResponse = botResponse.replace(/\*/g, '');
           
           // 2. Xóa lời chúc cũ (nếu API có tự sinh ra)
-          botResponse = botResponse.replace(/Chúc bạn ôn tập tốt cùng Ôn Thi Trắc Nghiệm Pro[.!]*\s*/gi, '');
+          botResponse = botResponse.replace(/Chúc bạn ôn tập tốt cho kì tuyển sinh cao học Đại học kinh tế quốc dân [.!]*\s*/gi, '');
           
           // 3. Thêm câu chúc yêu cầu (In đậm bằng HTML) vào cuối câu trả lời
-          botResponse = botResponse.trim() + '\n\n<b>Cố gắng ôn thi cao học nhé</b>';
+          botResponse = botResponse.trim() + '\n\n<b>Cố gắng ôn thi cao học nhé🍀</b>';
 
           addMessage(botResponse, 'bot');
           return;
