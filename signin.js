@@ -74,7 +74,11 @@
   const inc = (n) => firebase.firestore.FieldValue.increment(n);
 
   function escapeHtml(s) {
-    if (window.Utils && typeof Utils.escapeHtml === 'function') return Utils.escapeHtml(String(s ?? ''));
+    // LƯU Ý: Utils trong index.html được khai báo bằng "const Utils = {...}" ở
+    // top-level, kiểu khai báo này KHÔNG gắn thành thuộc tính của "window", nên
+    // "window.Utils" luôn luôn là undefined dù Utils đã tồn tại và dùng được
+    // như một biến toàn cục bình thường. Vì vậy phải kiểm tra bằng "typeof".
+    if (typeof Utils !== 'undefined' && typeof Utils.escapeHtml === 'function') return Utils.escapeHtml(String(s ?? ''));
     return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
@@ -846,12 +850,14 @@
     },
 
     confirmThen(title, msg, fn) {
-      if (window.UIManager && typeof UIManager.confirm === 'function') UIManager.confirm(title, msg, fn);
+      // UIManager cũng là "const" ở top-level trong index.html -> "window.UIManager"
+      // luôn undefined. Phải kiểm tra bằng "typeof" thay vì qua "window.".
+      if (typeof UIManager !== 'undefined' && typeof UIManager.confirm === 'function') UIManager.confirm(title, msg, fn);
       else if (confirm(msg)) fn();
     },
 
     toast(type, title, msg) {
-      if (window.UIManager && typeof UIManager.toast === 'function') UIManager.toast(type, title, msg);
+      if (typeof UIManager !== 'undefined' && typeof UIManager.toast === 'function') UIManager.toast(type, title, msg);
     },
 
     handleAction(action, uid) {
@@ -1062,12 +1068,58 @@
 
   /* ==========================================================================
      3. MÓC VÀO VÒNG ĐỜI CÓ SẴN — chỉ ghi đè (wrap), không sửa hàm gốc
+     ----------------------------------------------------------------------------
+     ⚠️ NGUYÊN NHÂN THỰC SỰ khiến menu "Quản lý đăng nhập" không hiện ra dù đã
+     có <script src="signin.js"></script>:
+
+     AuthManager (và cả UIManager, CloudSync, Utils, fbDb, fbAuth...) trong
+     index.html đều được khai báo theo kiểu:
+         const AuthManager = { ... };
+     Với khai báo top-level bằng "const" (hoặc "let") trong 1 thẻ <script>,
+     trình duyệt KHÔNG gắn biến đó thành thuộc tính của đối tượng "window"
+     (khác hẳn với "var", vốn luôn tạo ra window.tenBien). Do đó điều kiện
+     cũ ở đây:
+         if (window.AuthManager) { ... }
+     luôn luôn là false — bất kể <script src="signin.js"> được đặt ở đâu
+     trong index.html (đầu <head>, giữa hay cuối <body>). Toàn bộ khối code
+     patch AuthManager.checkAccess vì vậy KHÔNG BAO GIỜ chạy => sidebar
+     admin, view "Quản lý đăng nhập" không bao giờ được chèn vào.
+
+     CÁCH KHẮC PHỤC (không cần sửa gì trong index.html):
+     - Không kiểm tra sự tồn tại của AuthManager qua "window.AuthManager"
+       nữa, mà dùng "typeof AuthManager !== 'undefined'" và truy cập nó như
+       một biến toàn cục (bare identifier) — cách này hoạt động đúng vì mọi
+       thẻ <script> (kể cả file .js rời) trong cùng 1 trang HTML đều dùng
+       chung 1 "global lexical environment" cho các khai báo const/let.
+     - Chỉ thực hiện việc patch SAU KHI toàn bộ script đồng bộ của trang đã
+       chạy xong, tức là:
+         + Nếu trang còn đang tải (document.readyState === 'loading') thì
+           đợi sự kiện DOMContentLoaded rồi mới patch. Vì mọi <script>
+           không có "defer/async" (kể cả đoạn khai báo "const AuthManager")
+           luôn chạy xong TRƯỚC KHI DOMContentLoaded được bắn ra, nên tại
+           thời điểm đó AuthManager chắc chắn đã tồn tại — không còn phụ
+           thuộc vào việc thẻ <script src="signin.js"> nằm trước hay sau
+           đoạn định nghĩa AuthManager trong file HTML.
+         + Nếu trang đã tải xong rồi (ví dụ signin.js được thêm/tải muộn)
+           thì patch ngay lập tức.
+     - Có thêm vòng lặp thử lại (setTimeout) và cờ chống patch trùng lặp để
+       an toàn tuyệt đối trong mọi trường hợp chèn script.
      ========================================================================== */
 
-  // Ghi đè checkAccess ngay lập tức (đồng bộ, chạy trước khi AuthManager.init()
-  // được gọi ở DOMContentLoaded) — kỹ thuật tương tự cách index.html tự wrap
-  // CloudSync.init / UIManager.navigate ở phần "Đề cộng đồng".
-  if (window.AuthManager) {
+  function bootSignInManager() {
+    if (typeof AuthManager === 'undefined') {
+      // Trường hợp cực hiếm: cấu trúc index.html thay đổi và AuthManager chưa
+      // tồn tại kể cả khi DOM đã sẵn sàng — thử lại một vài lần rồi báo lỗi.
+      bootSignInManager._retries = (bootSignInManager._retries || 0) + 1;
+      if (bootSignInManager._retries <= 50) { setTimeout(bootSignInManager, 100); }
+      else console.error('[signin.js] Không tìm thấy AuthManager trong index.html — huỷ khởi tạo SignInManager.');
+      return;
+    }
+    if (AuthManager.__signInManagerPatched) return; // chống patch 2 lần
+    AuthManager.__signInManagerPatched = true;
+
+    // Ghi đè checkAccess: chuyển toàn bộ luồng đăng nhập/kiểm tra quyền từ
+    // collection "allowedUsers" cũ sang kiến trúc users/loginRequests/auditLogs.
     AuthManager.checkAccess = function (user) { return SignInManager.handleCheckAccess(user); };
 
     const _origDoSignOut = AuthManager.doSignOut.bind(AuthManager);
@@ -1079,6 +1131,22 @@
       if (cur) { try { await Promise.race([SignInManager.recordLogout(cur.uid, cur.email), new Promise(r => setTimeout(r, 1500))]); } catch (e) {} }
       return _origDoSignOut();
     };
+
+    // Nếu người dùng đã đăng nhập XONG trước khi patch kịp gắn vào (ví dụ
+    // signin.js bị tải rất muộn), chủ động chạy lại việc kiểm tra quyền +
+    // tiêm giao diện admin ngay để không bị lỡ, thay vì phải tải lại trang.
+    if (AuthManager.currentUser) {
+      SignInManager.handleCheckAccess(AuthManager.currentUser);
+    }
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', bootSignInManager);
+  } else {
+    // Trang đã parse xong (readyState 'interactive'/'complete'): mọi <script>
+    // đồng bộ của index.html — bao gồm đoạn khai báo AuthManager — chắc chắn
+    // đã chạy xong, nên có thể patch ngay, không cần đợi thêm.
+    bootSignInManager();
   }
 
   window.SignInManager = SignInManager;
