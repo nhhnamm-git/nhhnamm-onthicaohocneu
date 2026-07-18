@@ -3600,5 +3600,525 @@ document.addEventListener('keydown', function(e) {
 
 })();
 </script>
+
+<!-- ==========================================================================
+     ĐỀ CỘNG ĐỒNG (User-shared exams) — BỔ SUNG THÊM, KHÔNG SỬA LOGIC GỐC
+     ==========================================================================
+     Mục tiêu: cho phép MỌI người dùng (không chỉ Admin) tải đề (JSON hoặc
+     PDF + đáp án Excel) lên để TẤT CẢ người dùng khác cùng xem/làm bài —
+     giống hệt tính năng "Chia sẻ cho tất cả người dùng" của Admin, nhưng:
+       - Lưu ở collection RIÊNG BIỆT "communityExams" (KHÔNG đụng tới
+         collection "sharedCustomExams" mà Admin đang dùng).
+       - User thường TUYỆT ĐỐI KHÔNG có quyền/khả năng cập nhật thẳng vào
+         "300 câu hỏi gốc" (collection sharedQuestionBank) — nút/checkbox đó
+         vẫn chỉ hiện với Admin y như code gốc, khu vực này không đụng tới.
+       - Mỗi đề cộng đồng được TAG rõ người đã tải lên (uid + email) để mọi
+         người đều nhìn thấy "Người tải lên: ...". Chỉ chính chủ (đúng uid)
+         hoặc Admin mới xoá được đề của mình/của người khác.
+     Toàn bộ phần dưới đây CHỈ CHÈN THÊM DOM + gọi lại các hàm/API sẵn có
+     (CloudSync.fileToBase64, CloudSync.savePdfChunks, CloudSync.loadPdfChunks,
+     QuizManager.startCustomExam, PdfExamManager.start...) bằng cách "wrap"
+     thêm (giống kỹ thuật AdminExamPanel ở trên) — KHÔNG sửa bất kỳ dòng code
+     gốc nào của app.
+
+     ‼️ CẦN BỔ SUNG FIRESTORE SECURITY RULES cho collection mới này, ví dụ:
+
+     match /communityExams/{examId} {
+       allow read: if request.auth != null;
+       allow create: if request.auth != null &&
+         request.resource.data.createdByUid == request.auth.uid;
+       allow delete: if request.auth != null && (
+         resource.data.createdByUid == request.auth.uid ||
+         get(/databases/$(database)/documents/allowedUsers/$(request.auth.token.email.lower())).data.role == 'admin'
+       );
+       match /pdfChunks/{chunkId} {
+         allow read: if request.auth != null;
+         allow write: if request.auth != null; // ghi kèm lúc tạo đề (create ở trên)
+       }
+     }
+     ========================================================================== */
+<script>
+(function(){
+
+  /* ---------------------------------------------------------------------
+     1) COMMUNITY SYNC — lắng nghe realtime collection "communityExams"
+     --------------------------------------------------------------------- */
+  const CommunitySync = {
+    list: [],
+    unsub: null,
+
+    start(){
+      if(this.unsub) return;
+      this.unsub = fbDb.collection('communityExams').orderBy('createdAt','desc')
+        .onSnapshot(snap=>{
+          this.list = snap.docs.map(d=>({ id:d.id, community:true, ...d.data() }));
+          CommunityExamUI.render();
+        }, err=>{
+          console.error('[Community] Lỗi tải đề cộng đồng:', err);
+          CommunityExamUI.renderError(err);
+        });
+    },
+    stop(){
+      if(this.unsub){ try{ this.unsub(); }catch(e){} }
+      this.unsub = null;
+      this.list = [];
+    },
+    getById(id){ return this.list.find(e=>e.id===id) || null; },
+
+    docRef(examId){ return fbDb.collection('communityExams').doc(examId); },
+
+    async createJson(name, questions){
+      return fbDb.collection('communityExams').add({
+        type:'json', name, questions, totalQuestions: questions.length,
+        createdAt: new Date().toISOString(),
+        createdByUid: CloudSync.uid, createdByEmail: CloudSync.email
+      });
+    },
+
+    async createPdf(name, totalQuestions, numOptions, answerKey, pdfFile){
+      CloudSync.checkPdfSize(pdfFile);
+      const docRef = fbDb.collection('communityExams').doc();
+      const pdfName = pdfFile.name || (name+'.pdf');
+      const baseDoc = {
+        type:'pdf', name, totalQuestions, numOptions, answerKey, pdfName,
+        createdAt: new Date().toISOString(),
+        createdByUid: CloudSync.uid, createdByEmail: CloudSync.email
+      };
+      if(pdfFile.size <= CloudSync.CHUNK_RAW_BYTES){
+        const pdfBase64 = await CloudSync.fileToBase64(pdfFile);
+        await docRef.set({ ...baseDoc, pdfBase64 });
+      } else {
+        let chunkCount;
+        try{
+          chunkCount = await CloudSync.savePdfChunks(docRef, pdfFile);
+        }catch(err){
+          try{
+            const snap = await docRef.collection('pdfChunks').get();
+            await Promise.all(snap.docs.map(d=>d.ref.delete()));
+          }catch(cleanupErr){ console.error('Lỗi dọn dẹp pdfChunks (community):', cleanupErr); }
+          throw err;
+        }
+        await docRef.set({ ...baseDoc, pdfChunked:true, pdfTotalBytes: pdfFile.size, pdfChunkCount: chunkCount });
+      }
+      return docRef;
+    },
+
+    async deleteExam(exam){
+      const isOwner = exam.createdByUid && exam.createdByUid === CloudSync.uid;
+      if(!isOwner && !CloudSync.isAdmin){
+        throw new Error('Bạn chỉ có thể xóa đề cộng đồng do chính mình tải lên');
+      }
+      const docRef = this.docRef(exam.id);
+      if(exam.pdfChunked){
+        try{
+          const snap = await docRef.collection('pdfChunks').get();
+          await Promise.all(snap.docs.map(d=>d.ref.delete()));
+        }catch(e){ console.error('Lỗi xoá pdfChunks (community):', e); }
+      }
+      await docRef.delete();
+    }
+  };
+
+  /* ---------------------------------------------------------------------
+     2) WRAP CustomExamManager.getById / CloudSync.examDocRef — để các hàm
+        làm bài sẵn có (QuizManager.startCustomExam, PdfExamManager.start,
+        CloudSync.getPdfBlobUrl) NHẬN DIỆN được đề cộng đồng mà KHÔNG cần
+        sửa bất kỳ hàm gốc nào — chỉ bọc thêm để "rơi xuống" tra thêm ở
+        CommunitySync khi không tìm thấy trong đề gốc/đề riêng.
+     --------------------------------------------------------------------- */
+  const _origGetById = CustomExamManager.getById.bind(CustomExamManager);
+  CustomExamManager.getById = function(id){
+    return _origGetById(id) || CommunitySync.getById(id);
+  };
+
+  const _origExamDocRef = CloudSync.examDocRef.bind(CloudSync);
+  CloudSync.examDocRef = function(exam){
+    if(exam && exam.community) return CommunitySync.docRef(exam.id);
+    return _origExamDocRef(exam);
+  };
+
+  /* ---------------------------------------------------------------------
+     3) GIAO DIỆN — chèn thêm mục "Đề cộng đồng" vào sidebar + 1 view mới,
+        KHÔNG động tới HTML/section gốc.
+     --------------------------------------------------------------------- */
+  function injectDom(){
+    // 3a) Nav item mới, thêm ngay dưới mục "Đề tự tạo"
+    const customExamNav = document.querySelector('.nav-item[data-view="customExam"]');
+    if(customExamNav && !document.querySelector('.nav-item[data-view="community"]')){
+      const btn = document.createElement('button');
+      btn.className = 'nav-item';
+      btn.dataset.view = 'community';
+      btn.innerHTML = '<i class="fa-solid fa-users"></i> Đề cộng đồng';
+      customExamNav.insertAdjacentElement('afterend', btn);
+    }
+
+    // 3b) View mới, thêm ngay sau section "view-customExam"
+    const customExamView = document.getElementById('view-customExam');
+    if(customExamView && !document.getElementById('view-community')){
+      const section = document.createElement('section');
+      section.className = 'view';
+      section.id = 'view-community';
+      section.innerHTML = `
+        <div class="section-head">
+          <div><h2>Đề cộng đồng</h2><p>Bất kỳ ai cũng có thể tải đề lên đây để TẤT CẢ người dùng khác cùng xem/làm bài. Đề cộng đồng KHÔNG ảnh hưởng tới 300 câu hỏi gốc và chỉ người tải lên (hoặc Admin) mới xoá được.</p></div>
+        </div>
+
+        <div id="communityExamEmptyState" class="empty-state" style="display:none;">
+          <i class="fa-solid fa-users"></i>
+          <p>Chưa có ai tải đề cộng đồng nào. Hãy là người đầu tiên!</p>
+        </div>
+        <div class="parts-grid" id="communityExamGrid" style="margin-bottom:26px;"></div>
+
+        <div class="ce-create-grid">
+          <!-- Tạo đề cộng đồng từ JSON -->
+          <div class="card" style="padding:24px;">
+            <h3 class="ce-card-title"><i class="fa-solid fa-file-code"></i> Tải đề JSON lên cho mọi người</h3>
+            <p class="ce-card-desc">Nhập file questions.json (định dạng chuẩn: id/question/options/answer). Đề sẽ hiện cho TẤT CẢ người dùng, có gắn tên bạn là người tải lên. Không ảnh hưởng 300 câu hỏi gốc.</p>
+            <div class="input-group">
+              <label>Tên đề</label>
+              <input type="text" id="communityJsonNameInput" class="text-input" placeholder="VD: Đề luyện thi cộng đồng số 1">
+            </div>
+            <div class="dropzone" id="communityJsonDropzone">
+              <i class="fa-solid fa-cloud-arrow-up"></i>
+              <p style="font-weight:700; margin-bottom:4px;">Kéo thả hoặc bấm để chọn file questions.json</p>
+              <p style="font-size:12px; color:var(--text-muted);">Hệ thống sẽ tự kiểm tra định dạng JSON hợp lệ</p>
+              <input type="file" id="communityJsonFileInput" accept=".json" style="display:none;">
+            </div>
+            <div id="communityJsonStatus" style="margin-top:16px; font-size:13px;"></div>
+          </div>
+
+          <!-- Tạo đề cộng đồng từ PDF + Excel đáp án -->
+          <div class="card" style="padding:24px;">
+            <h3 class="ce-card-title"><i class="fa-solid fa-file-pdf"></i> Tải đề PDF + đáp án Excel cho mọi người</h3>
+            <p class="ce-card-desc">Upload đề thi dạng PDF, tải file mẫu Excel để điền đáp án rồi upload lại. Đề sẽ hiện cho TẤT CẢ người dùng, có gắn tên bạn là người tải lên.</p>
+
+            <div class="input-group">
+              <label>Tên đề</label>
+              <input type="text" id="communityPdfNameInput" class="text-input" placeholder="VD: Đề thi thử cộng đồng">
+            </div>
+            <div class="input-row">
+              <div class="input-group">
+                <label>Số câu hỏi</label>
+                <input type="number" id="communityPdfCountInput" class="text-input" min="1" max="300" value="50">
+              </div>
+              <div class="input-group">
+                <label>Số lựa chọn / câu</label>
+                <select id="communityPdfOptCountSelect" class="select-box" style="width:100%;">
+                  <option value="4" selected>4 (A-D)</option>
+                  <option value="5">5 (A-E)</option>
+                  <option value="3">3 (A-C)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="dropzone" id="communityPdfDropzone">
+              <i class="fa-solid fa-file-pdf"></i>
+              <p style="font-weight:700; margin-bottom:4px;" id="communityPdfDropzoneLabel">Kéo thả hoặc bấm để chọn file PDF đề thi</p>
+              <p style="font-size:12px; color:var(--text-muted);">Chỉ chấp nhận định dạng .pdf</p>
+              <input type="file" id="communityPdfFileInput" accept=".pdf" style="display:none;">
+            </div>
+
+            <div class="ce-step-divider"><i class="fa-solid fa-file-excel"></i> Bước 2: Đáp án</div>
+            <div class="ce-excel-actions">
+              <button class="btn btn-outline btn-sm" id="communityDownloadTemplateBtn"><i class="fa-solid fa-download"></i> Tải file mẫu đáp án (Excel)</button>
+            </div>
+            <div class="dropzone" id="communityExcelDropzone" style="margin-top:12px;">
+              <i class="fa-solid fa-file-excel"></i>
+              <p style="font-weight:700; margin-bottom:4px;" id="communityExcelDropzoneLabel">Kéo thả hoặc bấm để chọn file Excel đáp án đã điền</p>
+              <p style="font-size:12px; color:var(--text-muted);">Định dạng .xlsx / .xls, gồm cột STT và Đáp án</p>
+              <input type="file" id="communityExcelFileInput" accept=".xlsx,.xls" style="display:none;">
+            </div>
+
+            <div id="communityPdfCreateStatus" style="margin-top:16px; font-size:13px;"></div>
+            <button class="btn btn-primary" id="createCommunityPdfExamBtn" style="margin-top:14px; width:100%;" disabled><i class="fa-solid fa-circle-plus"></i> Tải đề lên cho mọi người</button>
+          </div>
+        </div>
+      `;
+      customExamView.insertAdjacentElement('afterend', section);
+    }
+  }
+
+  /* ---------------------------------------------------------------------
+     4) LOGIC UI — tạo đề JSON / PDF cộng đồng, render danh sách, xoá đề
+     --------------------------------------------------------------------- */
+  const CommunityExamUI = {
+    pendingPdfFile: null,
+    pendingAnswerKey: null,
+    pendingAnswerCount: 0,
+    wired: false,
+
+    render(){
+      const gridEl = document.getElementById('communityExamGrid');
+      const emptyEl = document.getElementById('communityExamEmptyState');
+      if(!gridEl || !emptyEl) return;
+      const list = CommunitySync.list;
+      emptyEl.style.display = list.length ? 'none' : 'block';
+      gridEl.innerHTML = list.map(e=>{
+        const isJson = e.type === 'json';
+        const isOwner = e.createdByUid && CloudSync.uid && e.createdByUid === CloudSync.uid;
+        const canManage = isOwner || (typeof AuthManager!=='undefined' && AuthManager.isAdmin());
+        return `<div class="card custom-exam-card">
+          <div class="part-top">
+            <span class="part-name">${Utils.escapeHtml(e.name||'(không tên)')}</span>
+            <span class="exam-type-badge ${e.type}">${isJson ? 'JSON' : 'PDF'}</span>
+          </div>
+          <div class="part-meta"><span>${e.totalQuestions||0} câu</span><span>${e.createdAt ? new Date(e.createdAt).toLocaleDateString('vi-VN') : ''}</span></div>
+          ${!isJson ? `<div class="part-meta"><span><i class="fa-solid fa-stopwatch"></i> Giờ làm bài: ${Utils.formatSecToClock((e.totalQuestions||0)*90)}</span></div>` : ''}
+          <div class="part-meta">
+            <span class="exam-owner-shared" style="display:flex;align-items:center;gap:6px;">
+              <i class="fa-solid fa-circle-user"></i> Người tải lên: <b>${Utils.escapeHtml(e.createdByEmail || '(không rõ)')}</b>
+            </span>
+          </div>
+          <div class="ce-card-actions">
+            <button class="btn btn-primary btn-sm" onclick="${isJson ? `QuizManager.startCustomExam('${e.id}')` : `PdfExamManager.start('${e.id}')`}"><i class="fa-solid fa-play"></i> Làm bài</button>
+            ${!isJson ? `<button class="btn btn-outline btn-sm" onclick="CommunityExamUI.viewPdf('${e.id}')"><i class="fa-solid fa-eye"></i> Xem PDF</button>` : ''}
+            ${canManage ? `<button class="btn btn-ghost btn-sm" onclick="CommunityExamUI.confirmDelete('${e.id}')"><i class="fa-solid fa-trash"></i> Xóa</button>` : ''}
+          </div>
+        </div>`;
+      }).join('');
+    },
+
+    renderError(err){
+      const gridEl = document.getElementById('communityExamGrid');
+      if(!gridEl) return;
+      gridEl.innerHTML = `<div class="empty-state" style="grid-column:1/-1;color:var(--danger);">
+        <i class="fa-solid fa-triangle-exclamation"></i>
+        <p>Không tải được đề cộng đồng. Chi tiết: ${Utils.escapeHtml(err.message||'')}</p>
+      </div>`;
+    },
+
+    async viewPdf(id){
+      const exam = CommunitySync.getById(id);
+      if(!exam) return;
+      try{
+        const url = await CloudSync.getPdfBlobUrl(exam);
+        if(url) window.open(url, '_blank');
+        else UIManager.toast('error','Không có file PDF','Đề này không có dữ liệu PDF');
+      }catch(err){ UIManager.toast('error','Lỗi', err.message); }
+    },
+
+    confirmDelete(id){
+      const exam = CommunitySync.getById(id);
+      if(!exam) return;
+      const isOwner = exam.createdByUid && CloudSync.uid && exam.createdByUid === CloudSync.uid;
+      if(!isOwner && !(typeof AuthManager!=='undefined' && AuthManager.isAdmin())){
+        UIManager.toast('error','Không có quyền','Bạn chỉ có thể xóa đề cộng đồng do chính mình tải lên'); return;
+      }
+      UIManager.confirm('Xóa đề cộng đồng này?', `Đề "${exam.name}" sẽ bị xóa vĩnh viễn cho TẤT CẢ người dùng, không thể hoàn tác.`, async ()=>{
+        try{
+          await CommunitySync.deleteExam(exam);
+          UIManager.toast('success','Đã xóa', `Đề "${exam.name}" đã được xóa`);
+        }catch(err){ UIManager.toast('error','Xóa thất bại', err.message); }
+      });
+    },
+
+    handleJsonFile(file){
+      const statusEl = document.getElementById('communityJsonStatus');
+      if(!file.name.endsWith('.json')){
+        statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File phải có định dạng .json</span>`;
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = async (e)=>{
+        const nameInput = document.getElementById('communityJsonNameInput');
+        try{
+          const data = JSON.parse(e.target.result);
+          if(!Array.isArray(data)) throw new Error('Dữ liệu phải là một mảng (array) các câu hỏi');
+          data.forEach((q,i)=>{
+            if(!q.id || !q.question || !q.options || !q.answer) throw new Error(`Câu hỏi tại vị trí ${i+1} thiếu trường bắt buộc (id/question/options/answer)`);
+          });
+          const name = (nameInput.value || '').trim() || file.name.replace(/\.json$/i,'');
+          statusEl.innerHTML = `<span style="color:var(--text-muted);"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải đề lên cho mọi người...</span>`;
+          await CommunitySync.createJson(name, data);
+          statusEl.innerHTML = `<span style="color:var(--success);"><i class="fa-solid fa-circle-check"></i> Đã tải đề "${Utils.escapeHtml(name)}" với ${data.length} câu hỏi lên cho TẤT CẢ người dùng!</span>`;
+          UIManager.toast('success','Tải đề thành công', `"${name}" — mọi người dùng đều thấy được`);
+          nameInput.value = '';
+          document.getElementById('communityJsonFileInput').value = '';
+        }catch(err){
+          statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> Lỗi: ${Utils.escapeHtml(err.message)}</span>`;
+          UIManager.toast('error','Thao tác thất bại', err.message);
+        }
+      };
+      reader.readAsText(file, 'UTF-8');
+    },
+
+    handlePdfFile(file){
+      const statusEl = document.getElementById('communityPdfCreateStatus');
+      if(!file.name.toLowerCase().endsWith('.pdf')){
+        statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File phải có định dạng .pdf</span>`;
+        return;
+      }
+      if(file.size > CloudSync.MAX_PDF_BYTES){
+        const maxMb = (CloudSync.MAX_PDF_BYTES/(1024*1024)).toFixed(0);
+        const fileMb = (file.size/(1024*1024)).toFixed(1);
+        statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File quá lớn (${fileMb}MB, tối đa ~${maxMb}MB). Hãy nén PDF ở ilovepdf.com/compress_pdf rồi thử lại.</span>`;
+        return;
+      }
+      this.pendingPdfFile = file;
+      document.getElementById('communityPdfDropzoneLabel').textContent = `Đã chọn: ${file.name} ✓`;
+      statusEl.innerHTML = '';
+      this.updateCreateButtonState();
+    },
+
+    downloadTemplate(){
+      const count = parseInt(document.getElementById('communityPdfCountInput').value, 10) || 50;
+      const rows = [['STT','Đáp án (A/B/C/D...)']];
+      for(let i=1;i<=count;i++) rows.push([i, '']);
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws['!cols'] = [{wch:8},{wch:24}];
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'DapAn');
+      XLSX.writeFile(wb, `mau_dap_an_cong_dong_${count}_cau.xlsx`);
+      UIManager.toast('success','Đã tải file mẫu', `Điền đáp án cho ${count} câu vào cột "Đáp án" rồi upload lại`);
+    },
+
+    handleExcelFile(file){
+      const statusEl = document.getElementById('communityPdfCreateStatus');
+      if(!/\.(xlsx|xls)$/i.test(file.name)){
+        statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> File phải có định dạng .xlsx hoặc .xls</span>`;
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = (e)=>{
+        try{
+          const data = new Uint8Array(e.target.result);
+          const wb = XLSX.read(data, {type:'array'});
+          const ws = wb.Sheets[wb.SheetNames[0]];
+          const rows = XLSX.utils.sheet_to_json(ws, {header:1, defval:''});
+          const numOptions = parseInt(document.getElementById('communityPdfOptCountSelect').value, 10);
+          const validLetters = Array.from({length:numOptions}, (_,i)=>String.fromCharCode(65+i));
+          const answerKey = {};
+          let count = 0;
+          rows.forEach((row, idx)=>{
+            if(idx===0) return;
+            const stt = row[0];
+            if(stt===''||stt===undefined||stt===null) return;
+            const n = parseInt(stt, 10);
+            if(!n) return;
+            const ans = (row[1]!==undefined && row[1]!==null) ? String(row[1]).trim().toUpperCase() : '';
+            if(!ans) throw new Error(`Câu ${n} chưa được điền đáp án`);
+            if(!validLetters.includes(ans)) throw new Error(`Câu ${n} có đáp án "${ans}" không hợp lệ (chỉ chấp nhận ${validLetters.join(', ')})`);
+            answerKey[n] = ans;
+            count++;
+          });
+          if(!count) throw new Error('Không tìm thấy dữ liệu đáp án hợp lệ trong file');
+          this.pendingAnswerKey = answerKey;
+          this.pendingAnswerCount = count;
+          document.getElementById('communityExcelDropzoneLabel').textContent = `Đã nạp ${count} đáp án ✓`;
+          document.getElementById('communityPdfCountInput').value = count;
+          statusEl.innerHTML = `<span style="color:var(--success);"><i class="fa-solid fa-circle-check"></i> Đã đọc thành công ${count} đáp án. Thời gian làm bài dự kiến: ${Utils.formatSecToClock(count*90)}</span>`;
+        }catch(err){
+          this.pendingAnswerKey = null;
+          this.pendingAnswerCount = 0;
+          statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> Lỗi: ${Utils.escapeHtml(err.message)}</span>`;
+        }
+        this.updateCreateButtonState();
+      };
+      reader.readAsArrayBuffer(file);
+    },
+
+    updateCreateButtonState(){
+      const btn = document.getElementById('createCommunityPdfExamBtn');
+      if(btn) btn.disabled = !(this.pendingPdfFile && this.pendingAnswerKey);
+    },
+
+    async createPdfExam(){
+      if(!this.pendingPdfFile || !this.pendingAnswerKey) return;
+      const nameInput = document.getElementById('communityPdfNameInput');
+      const name = (nameInput.value || '').trim() || this.pendingPdfFile.name.replace(/\.pdf$/i,'');
+      const numOptions = parseInt(document.getElementById('communityPdfOptCountSelect').value, 10);
+      const total = this.pendingAnswerCount;
+
+      const statusEl = document.getElementById('communityPdfCreateStatus');
+      const btn = document.getElementById('createCommunityPdfExamBtn');
+      btn.disabled = true;
+      statusEl.innerHTML = `<span style="color:var(--text-muted);"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải file PDF lên cho mọi người, vui lòng đợi...</span>`;
+
+      try{
+        await CommunitySync.createPdf(name, total, numOptions, this.pendingAnswerKey, this.pendingPdfFile);
+        UIManager.toast('success','Tải đề thành công', `"${name}" — mọi người dùng đều thấy được (${total} câu, giờ làm bài: ${Utils.formatSecToClock(total*90)})`);
+
+        this.pendingPdfFile = null;
+        this.pendingAnswerKey = null;
+        this.pendingAnswerCount = 0;
+        nameInput.value = '';
+        document.getElementById('communityPdfCountInput').value = 50;
+        document.getElementById('communityPdfFileInput').value = '';
+        document.getElementById('communityExcelFileInput').value = '';
+        document.getElementById('communityPdfDropzoneLabel').textContent = 'Kéo thả hoặc bấm để chọn file PDF đề thi';
+        document.getElementById('communityExcelDropzoneLabel').textContent = 'Kéo thả hoặc bấm để chọn file Excel đáp án đã điền';
+        statusEl.innerHTML = '';
+      }catch(err){
+        statusEl.innerHTML = `<span style="color:var(--danger);"><i class="fa-solid fa-circle-xmark"></i> Lỗi: ${Utils.escapeHtml(err.message)}</span>`;
+        UIManager.toast('error','Tải đề thất bại', err.message);
+      }
+      this.updateCreateButtonState();
+    },
+
+    wireEvents(){
+      if(this.wired) return;
+      this.wired = true;
+
+      const wireDropzone = (dzId, inputId, handler)=>{
+        const dz = document.getElementById(dzId);
+        const input = document.getElementById(inputId);
+        if(!dz || !input) return;
+        dz.addEventListener('click', ()=>input.click());
+        dz.addEventListener('dragover', e=>{ e.preventDefault(); dz.classList.add('drag'); });
+        dz.addEventListener('dragleave', ()=> dz.classList.remove('drag'));
+        dz.addEventListener('drop', e=>{
+          e.preventDefault(); dz.classList.remove('drag');
+          if(e.dataTransfer.files.length) handler(e.dataTransfer.files[0]);
+        });
+        input.addEventListener('change', e=>{ if(e.target.files.length) handler(e.target.files[0]); });
+      };
+      wireDropzone('communityJsonDropzone','communityJsonFileInput', f=>this.handleJsonFile(f));
+      wireDropzone('communityPdfDropzone','communityPdfFileInput', f=>this.handlePdfFile(f));
+      wireDropzone('communityExcelDropzone','communityExcelFileInput', f=>this.handleExcelFile(f));
+
+      const tplBtn = document.getElementById('communityDownloadTemplateBtn');
+      if(tplBtn) tplBtn.addEventListener('click', ()=>this.downloadTemplate());
+      const createBtn = document.getElementById('createCommunityPdfExamBtn');
+      if(createBtn) createBtn.addEventListener('click', ()=>this.createPdfExam());
+    }
+  };
+
+  /* ---------------------------------------------------------------------
+     5) MÓC VÀO VÒNG ĐỜI CÓ SẴN — chỉ bọc thêm (wrap), không sửa hàm gốc
+     --------------------------------------------------------------------- */
+  injectDom();
+  CommunityExamUI.wireEvents();
+
+  const _origCloudSyncInit2 = CloudSync.init.bind(CloudSync);
+  CloudSync.init = async function(user, isAdmin){
+    const result = await _origCloudSyncInit2(user, isAdmin);
+    CommunitySync.start();
+    CommunityExamUI.render();
+    return result;
+  };
+
+  const _origCloudSyncTeardown2 = CloudSync.teardown.bind(CloudSync);
+  CloudSync.teardown = function(){
+    CommunitySync.stop();
+    return _origCloudSyncTeardown2();
+  };
+
+  if(!UIManager.titles.community){
+    UIManager.titles.community = ['Đề cộng đồng', 'Đề do người dùng tải lên cho tất cả mọi người cùng xem/làm bài'];
+  }
+
+  const _origNavigate2 = UIManager.navigate.bind(UIManager);
+  UIManager.navigate = function(view){
+    const result = _origNavigate2(view);
+    if(view === 'community') CommunityExamUI.render();
+    return result;
+  };
+
+  // Expose ra global để dùng được trong thuộc tính onclick="" của HTML sinh động
+  window.CommunitySync = CommunitySync;
+  window.CommunityExamUI = CommunityExamUI;
+
+})();
+</script>
 </body>
 </html>
