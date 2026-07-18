@@ -1,6 +1,6 @@
 // ==========================================================================
 // KHỈ AI CHATBOT WIDGET - FILE GỘP HOÀN CHỈNH
-// Tích hợp 100% UI Khỉ Robot và Logic API Gemini (Đã fix lỗi dấu * và câu chúc)
+// Tích hợp 100% UI Khỉ Robot và Logic API Groq (Đã fix lỗi dấu * và câu chúc)
 // Đã đồng bộ giao diện sáng/tối theo hệ thống (data-theme="dark")
 // ==========================================================================
 
@@ -253,15 +253,11 @@
 
   document.body.insertAdjacentHTML('beforeend', chatbotUI);
 
-  // 2. LOGIC XỬ LÝ API GEMINI VÀ UI CHATBOT
-  // ⚠️ QUAN TRỌNG: Giá trị bên dưới KHÔNG phải là API Key hợp lệ của Gemini.
-  // Key hợp lệ luôn có dạng "AIzaSy..." (lấy tại https://aistudio.google.com/apikey).
-  // Key cũ bắt đầu bằng "AQ." trông giống 1 access token/chuỗi bị cắt, không phải API key,
-  // nên Google trả về lỗi "invalid authentication credentials" như trong ảnh báo lỗi.
-  // => Hãy thay chuỗi dưới đây bằng API key thật của bạn.
-  const GEMINI_API_KEY = "AQ.Ab8RN6KxoM-6q8kSdJUI45KAaV1FqkUnQ5LKOz-_-Oww9-GlVQ";
-  // "gemini-3.5-flash-lite" không tồn tại → luôn trả 404. Model lite hợp lệ hiện tại là "gemini-3.1-flash-lite".
-  const GEMINI_MODELS = ["gemini-3.5-flash", "gemini-3.1-flash-lite"];
+  // 2. LOGIC XỬ LÝ API GROQ VÀ UI CHATBOT
+  // => Dán API Key Groq thật của bạn vào chuỗi bên dưới (lấy tại https://console.groq.com/keys).
+  const GROQ_API_KEY = "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";
+  // Model Groq đang dùng. Muốn đổi model sau này chỉ cần sửa đúng dòng này.
+  const GROQ_MODEL = "llama-3.3-70b-versatile";
 
   const widgetContainer = document.getElementById('ai-widget-container');
   const chatWindow = document.getElementById('bot-chat-window');
@@ -320,14 +316,22 @@
 
   const scrollToBottom = () => { chatBody.scrollTop = chatBody.scrollHeight; };
 
-  // --- Logic gọi API AI (Gemini) ---
-  async function callGemini(model, q) {
-    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${GEMINI_API_KEY}`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
+  // --- Logic gọi API AI (Groq) ---
+  async function callGroq(model, q) {
+    const res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${GROQ_API_KEY}`
+      },
       body: JSON.stringify({
-        contents: [{ parts: [{ text: q }] }],
-        // Cập nhật System Instruction để yêu cầu không sử dụng *
-        systemInstruction: { parts: [{ text: "Bạn là một trợ lý ảo hỗ trợ ôn thi. Trả lời ngắn gọn, chính xác bằng tiếng Việt. Tuyệt đối KHÔNG dùng ký tự * (dấu sao) hay định dạng markdown trong câu trả lời. Không tự tạo lời chào kết thúc vì hệ thống sẽ làm việc đó." }] }
+        model: model,
+        messages: [
+          // Giữ nguyên System Instruction để yêu cầu không sử dụng *
+          { role: "system", content: "Bạn là một trợ lý ảo hỗ trợ ôn thi. Trả lời ngắn gọn, chính xác bằng tiếng Việt. Tuyệt đối KHÔNG dùng ký tự * (dấu sao) hay định dạng markdown trong câu trả lời. Không tự tạo lời chào kết thúc vì hệ thống sẽ làm việc đó." },
+          { role: "user", content: q }
+        ],
+        temperature: 0.5
       })
     });
     const data = await res.json();
@@ -340,56 +344,48 @@
 
     let lastErrorMsg = "Lỗi không xác định từ máy chủ.";
 
-    for (let i = 0; i < GEMINI_MODELS.length; i++) {
-      const model = GEMINI_MODELS[i];
-      try {
-        const { ok, status, data } = await callGemini(model, q);
+    try {
+      const { ok, status, data } = await callGroq(GROQ_MODEL, q);
 
-        if (ok && data.candidates && data.candidates[0]?.content?.parts?.[0]?.text) {
-          typingIndicator.style.display = 'none';
-          
-          let botResponse = data.candidates[0].content.parts[0].text;
-          
-          // 1. Loại bỏ toàn bộ các dấu sao (*)
-          botResponse = botResponse.replace(/\*/g, '');
-          
-          // 2. Xóa lời chúc cũ (nếu API có tự sinh ra)
-          botResponse = botResponse.replace(/Chúc bạn ôn tập tốt cho kì tuyển sinh cao học Đại học kinh tế quốc dân [.!]*\s*/gi, '');
-          
-          // 3. Thêm câu chúc yêu cầu (In đậm bằng HTML) vào cuối câu trả lời
-          botResponse = botResponse.trim() + '\n\n<b>Cố gắng ôn thi cao học nhé🍀</b>';
-
-          addMessage(botResponse, 'bot');
-          return;
-        }
-
-        if (!ok) {
-          console.error(`Lỗi từ model ${model} (HTTP ${status}):`, data);
-          lastErrorMsg = data.error?.message || lastErrorMsg;
-          if ([429, 404, 503].includes(status) && i < GEMINI_MODELS.length - 1) continue;
-          
-          typingIndicator.style.display = 'none';
-          addMessage(`⚠️ Lỗi kết nối: ${lastErrorMsg}`, 'bot');
-          return;
-        }
-
+      if (ok && data.choices && data.choices[0]?.message?.content) {
         typingIndicator.style.display = 'none';
-        addMessage("Không nhận được câu trả lời hợp lệ từ AI.", 'bot');
-        return;
 
-      } catch (e) {
-        console.error(`Lỗi mạng khi gọi model ${model}:`, e);
-        lastErrorMsg = "Lỗi mạng, không thể kết nối tới máy chủ AI.";
-        if (i < GEMINI_MODELS.length - 1) continue;
-        
-        typingIndicator.style.display = 'none';
-        addMessage(`⚠️ ${lastErrorMsg}`, 'bot');
+        let botResponse = data.choices[0].message.content;
+
+        // 1. Loại bỏ toàn bộ các dấu sao (*)
+        botResponse = botResponse.replace(/\*/g, '');
+
+        // 2. Xóa lời chúc cũ (nếu API có tự sinh ra)
+        botResponse = botResponse.replace(/Chúc bạn ôn tập tốt cho kì tuyển sinh cao học Đại học kinh tế quốc dân [.!]*\s*/gi, '');
+
+        // 3. Thêm câu chúc yêu cầu (In đậm bằng HTML) vào cuối câu trả lời
+        botResponse = botResponse.trim() + '\n\n<b>Cố gắng ôn thi cao học nhé🍀</b>';
+
+        addMessage(botResponse, 'bot');
         return;
       }
+
+      if (!ok) {
+        console.error(`Lỗi từ model ${GROQ_MODEL} (HTTP ${status}):`, data);
+        lastErrorMsg = data.error?.message || lastErrorMsg;
+
+        typingIndicator.style.display = 'none';
+        addMessage(`⚠️ Lỗi kết nối: ${lastErrorMsg}`, 'bot');
+        return;
+      }
+
+      typingIndicator.style.display = 'none';
+      addMessage("Không nhận được câu trả lời hợp lệ từ AI.", 'bot');
+      return;
+
+    } catch (e) {
+      console.error(`Lỗi mạng khi gọi model ${GROQ_MODEL}:`, e);
+      lastErrorMsg = "Lỗi mạng, không thể kết nối tới máy chủ AI.";
+
+      typingIndicator.style.display = 'none';
+      addMessage(`⚠️ ${lastErrorMsg}`, 'bot');
+      return;
     }
-    
-    typingIndicator.style.display = 'none';
-    addMessage(`⚠️ Lỗi kết nối: ${lastErrorMsg}`, 'bot');
   }
 
   const handleSend = () => {
