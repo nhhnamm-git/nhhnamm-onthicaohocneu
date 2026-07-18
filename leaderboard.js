@@ -271,23 +271,33 @@
             const dayMs = 86400000;
 
             history.forEach(h => {
-                totalScore += h.score;
-                if (h.score > maxScore) maxScore = h.score;
-                totalCorrect += h.correct;
-                totalWrong += h.wrong;
-                if (h.score === 10) perfectScoreCount++;
-                if (h.partName.includes('Đề PDF') || h.partName.includes('JSON')) totalExamsCompleted++;
-                if (h.partName.toLowerCase().includes('khó') || h.partName.toLowerCase().includes('hard')) {
+                // Bảo vệ: nếu 1 bản ghi lịch sử thiếu field (partName/score/timestamp...) thì
+                // trước đây sẽ ném lỗi (VD: h.partName.includes khi partName undefined) làm
+                // toàn bộ calculateLocalStats() dừng giữa chừng => syncData() không chạy được
+                // => dữ liệu người dùng không bao giờ được ghi lên Firestore => leaderboard trống/không xếp hạng.
+                const hScore = h.score || 0;
+                const hCorrect = h.correct || 0;
+                const hWrong = h.wrong || 0;
+                const hPartName = h.partName || '';
+                const hTimeSec = h.timeSec || 0;
+
+                totalScore += hScore;
+                if (hScore > maxScore) maxScore = hScore;
+                totalCorrect += hCorrect;
+                totalWrong += hWrong;
+                if (hScore === 10) perfectScoreCount++;
+                if (hPartName.includes('Đề PDF') || hPartName.includes('JSON')) totalExamsCompleted++;
+                if (hPartName.toLowerCase().includes('khó') || hPartName.toLowerCase().includes('hard')) {
                     hardExamsCompleted++; quizHard++;
                 }
                 
-                const hDate = new Date(h.timestamp).getTime();
+                const hDate = h.timestamp ? new Date(h.timestamp).getTime() : now;
                 const diffDays = (now - hDate) / dayMs;
-                const hXp = (h.score * 10) + (h.correct * 2) + Math.round(h.timeSec/60);
+                const hXp = (hScore * 10) + (hCorrect * 2) + Math.round(hTimeSec/60);
                 
-                if (diffDays <= 1) studyToday += h.timeSec;
-                if (diffDays <= 7) { studyWeek += h.timeSec; weeklyXP += hXp; progress7Days += h.score; }
-                if (diffDays <= 30) { studyMonth += h.timeSec; monthlyXP += hXp; progress30Days += h.score; }
+                if (diffDays <= 1) studyToday += hTimeSec;
+                if (diffDays <= 7) { studyWeek += hTimeSec; weeklyXP += hXp; progress7Days += hScore; }
+                if (diffDays <= 30) { studyMonth += hTimeSec; monthlyXP += hXp; progress30Days += hScore; }
             });
 
             const quizzesTaken = history.length;
@@ -343,9 +353,13 @@
         async syncData() {
             if (typeof AuthManager === 'undefined' || !AuthManager.currentUser) return;
             const user = AuthManager.currentUser;
-            const newStats = this.calculateLocalStats();
-            
+
             try {
+                // calculateLocalStats() được đưa vào trong try/catch: trước đây nó được gọi
+                // TRƯỚC try block, nên nếu ném lỗi thì syncData() (và loadData() gọi nó) sẽ bị
+                // "vỡ" ngay lập tức, không ghi được dữ liệu lên Firestore => không xếp hạng.
+                const newStats = this.calculateLocalStats();
+
                 // Fetch current doc to prevent overwriting loginCount and joinedAt
                 const docRef = fbDb.collection('leaderboard').doc(user.uid);
                 const docSnap = await docRef.get();
@@ -386,7 +400,15 @@
             const tbody = document.getElementById('hofTableBody');
             if (tbody) tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding: 40px; color:var(--text-muted);"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải dữ liệu HOF...</td></tr>';
             
-            await this.syncData();
+            try {
+                // Trước đây await this.syncData() nằm ngoài try/catch: nếu syncData() lỗi
+                // (VD Firestore permission-denied, mất mạng...) thì loadData() sẽ bị "vỡ" ngay
+                // tại đây, không bao giờ chạy tới đoạn fetch + render bên dưới => bảng luôn
+                // đứng yên ở trạng thái "Đang tải dữ liệu HOF..." (không xếp hạng).
+                await this.syncData();
+            } catch (e) {
+                console.error("[HOF] Sync error (bỏ qua để vẫn tải bảng xếp hạng):", e);
+            }
 
             try {
                 // Fetch ALL to allow client side dynamic sorting across 40 metrics
