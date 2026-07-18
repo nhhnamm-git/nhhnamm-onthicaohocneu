@@ -141,7 +141,7 @@
                 const btn = document.createElement('button');
                 btn.className = 'nav-item';
                 btn.dataset.view = 'halloffame';
-                btn.innerHTML = '<i class="fa-solid fa-crown"></i> Thứ hạng';
+                btn.innerHTML = '<i class="fa-solid fa-crown"></i> Bảng xếp hạng';
                 
                 // Navigate Hook logic
                 btn.addEventListener('click', () => UIManager.navigate('halloffame'));
@@ -552,7 +552,7 @@
             clearInterval(observer);
             
             // 4.1. Khai báo title cho UIManager
-            UIManager.titles.halloffame = ['👑 Hall Of Fame', 'Bảng xếp hạng toàn diện của toàn bộ học viên'];
+            UIManager.titles.halloffame = ['Bảng xếp ', 'Bảng xếp hạng toàn diện của toàn bộ học viên'];
             
             // 4.2. Hook UIManager.navigate
             const _origNavigate = UIManager.navigate.bind(UIManager);
