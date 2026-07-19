@@ -44,12 +44,16 @@
       { id: 'thoibaokt',   name: 'Thời báo Kinh tế',      rss: 'https://thoibaokinhdoanh.vn/rss/home.rss',                category: 'Kinh tế'    }
     ],
 
-    // ---- RSS PROXY -----------------------------------------------------
-    // Đổi proxy chỉ bằng cách sửa 2 biến dưới đây.
-    // 'xml'  : proxy trả nguyên văn RSS/XML (vd allorigins) -> parse bằng DOMParser
-    // 'json' : proxy trả JSON đã parse sẵn (vd rss2json)     -> đọc thẳng field items
-    RSS_PROXY: 'https://api.allorigins.win/raw?url=',
-    RSS_PROXY_MODE: 'xml',
+    // ---- RSS PROXY (đa proxy, tự chuyển khi lỗi) ------------------------
+    // Muốn thêm/xoá/đổi thứ tự ưu tiên proxy chỉ cần sửa mảng này.
+    // mode: 'xml'  -> proxy trả nguyên văn RSS/XML, parse bằng DOMParser
+    //       'json' -> proxy trả JSON đã bọc sẵn (vd rss2json), đọc field items
+    //       'auto' -> không chắc proxy trả gì: thử parse JSON trước, thất bại thì parse XML
+    RSS_PROXY_LIST: [
+      { name: 'allorigins',  url: 'https://api.allorigins.win/raw?url=',              mode: 'xml'  },
+      { name: 'rss2json',    url: 'https://api.rss2json.com/v1/api.json?rss_url=',    mode: 'json' },
+      { name: 'corsproxy',   url: 'https://corsproxy.io/?url=',                       mode: 'auto' }
+    ],
 
     FETCH_TIMEOUT_MS: 15000,      // timeout mỗi request nguồn tin
     REFRESH_INTERVAL_MS: 60000,   // tự refresh mỗi 60s khi tab đang mở
@@ -191,33 +195,66 @@
 
   /* ==========================================================================
    * 3. NewsAPI — Lấy dữ liệu qua RSS Proxy (KHÔNG scrape, KHÔNG iframe).
-   *    Đổi proxy chỉ cần sửa NewsConfig.RSS_PROXY / RSS_PROXY_MODE.
+   *    Đổi/thêm/bớt proxy chỉ cần sửa NewsConfig.RSS_PROXY_LIST.
    * ========================================================================== */
   class NewsAPI {
-    /** Lấy & chuẩn hoá tin từ 1 nguồn. Trả về mảng article đã normalize. */
+    /**
+     * Lấy & chuẩn hoá tin từ 1 nguồn, thử lần lượt từng RSS Proxy trong
+     * NewsConfig.RSS_PROXY_LIST. Proxy đầu lỗi (timeout/HTTP lỗi/parse lỗi)
+     * -> tự động chuyển sang proxy tiếp theo. Chỉ khi TẤT CẢ proxy đều lỗi
+     * mới ném lỗi ra ngoài (để tầng gọi biết "nguồn lỗi").
+     */
     static async fetchSource(source) {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), NewsConfig.FETCH_TIMEOUT_MS);
-      try {
-        const proxied = NewsConfig.RSS_PROXY + encodeURIComponent(source.rss);
-        const res = await fetch(proxied, { signal: controller.signal });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const proxies = NewsConfig.RSS_PROXY_LIST;
+      let lastError = null;
 
-        let items;
-        if (NewsConfig.RSS_PROXY_MODE === 'json') {
-          const data = await res.json();
-          items = NewsAPI._parseJsonFeed(data);
-        } else {
+      for (const proxy of proxies) {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), NewsConfig.FETCH_TIMEOUT_MS);
+        try {
+          const proxied = proxy.url + encodeURIComponent(source.rss);
+          const res = await fetch(proxied, { signal: controller.signal });
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
           const text = await res.text();
-          items = NewsAPI._parseXmlFeed(text);
-        }
+          const items = NewsAPI._parseByMode(text, proxy.mode);
 
-        return items.map(it => NewsAPI._normalize(it, source));
-      } catch (err) {
-        // Ném lỗi kèm tên nguồn để tầng trên biết nguồn nào lỗi.
-        throw new Error(`[${source.name}] ${err.message || 'Fetch thất bại'}`);
-      } finally {
-        clearTimeout(timeoutId);
+          // Parse ra 0 bài dù response OK vẫn coi là nghi ngờ lỗi -> thử proxy khác,
+          // trừ khi đây là proxy cuối cùng thì chấp nhận trả về mảng rỗng.
+          if (items.length === 0 && proxy !== proxies[proxies.length - 1]) {
+            throw new Error('Không phân tích được bài viết nào (proxy có thể đã chặn)');
+          }
+
+          return items.map(it => NewsAPI._normalize(it, source));
+        } catch (err) {
+          lastError = err;
+          // Thử tiếp proxy kế tiếp trong danh sách, không dừng cả module.
+          continue;
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }
+
+      // Tất cả proxy đều lỗi -> báo nguồn này lỗi, nhưng KHÔNG làm crash các nguồn khác
+      // (Promise.allSettled ở fetchAll đã cô lập lỗi theo từng nguồn).
+      throw new Error(`[${source.name}] Tất cả RSS Proxy đều lỗi — ${(lastError && lastError.message) || 'không rõ nguyên nhân'}`);
+    }
+
+    /** Phân giải nội dung trả về theo mode của proxy ('xml' | 'json' | 'auto'). */
+    static _parseByMode(text, mode) {
+      if (mode === 'json') {
+        return NewsAPI._parseJsonFeed(JSON.parse(text));
+      }
+      if (mode === 'xml') {
+        return NewsAPI._parseXmlFeed(text);
+      }
+      // 'auto' — Auto Detect: thử JSON trước (rss2json/nhiều proxy khác trả JSON),
+      // nếu không phải JSON hợp lệ thì coi là XML và parse bằng DOMParser.
+      try {
+        const data = JSON.parse(text);
+        return NewsAPI._parseJsonFeed(data);
+      } catch (e) {
+        return NewsAPI._parseXmlFeed(text);
       }
     }
 
@@ -403,17 +440,25 @@
   class NewsFilter {
     constructor() {
       this.sourceId = 'all';   // 'all' hoặc source.id
+      this.category = 'all';   // 'all' hoặc tên chuyên mục
       this.range = 'all';      // 'all' | 'today' | 'week'
-      this.sort = 'newest';    // 'newest' | 'oldest'
+      this.sort = 'newest';    // 'newest' | 'oldest' | 'source'
     }
 
     apply(articles) {
       let result = articles.filter(a => {
         const okSource = this.sourceId === 'all' || a.sourceId === this.sourceId;
+        const okCategory = this.category === 'all' || a.category === this.category;
         const okRange = NewsUtils.isWithinRange(a.pubDate, this.range);
-        return okSource && okRange;
+        return okSource && okCategory && okRange;
       });
-      result.sort((a, b) => this.sort === 'oldest' ? a.pubTime - b.pubTime : b.pubTime - a.pubTime);
+      if (this.sort === 'oldest') {
+        result.sort((a, b) => a.pubTime - b.pubTime);
+      } else if (this.sort === 'source') {
+        result.sort((a, b) => a.source.localeCompare(b.source, 'vi') || b.pubTime - a.pubTime);
+      } else {
+        result.sort((a, b) => b.pubTime - a.pubTime);
+      }
       return result;
     }
   }
@@ -518,6 +563,10 @@
               <option value="all">Tất cả nguồn</option>
               ${NewsConfig.SOURCES.map(s => `<option value="${s.id}">${NewsUtils.escapeHtml(s.name)}</option>`).join('')}
             </select>
+            <select class="news-select" data-role="category-filter">
+              <option value="all">Tất cả chuyên mục</option>
+              ${Array.from(new Set(NewsConfig.SOURCES.map(s => s.category))).map(c => `<option value="${NewsUtils.escapeHtml(c)}">${NewsUtils.escapeHtml(c)}</option>`).join('')}
+            </select>
             <select class="news-select" data-role="range-filter">
               <option value="all">Mọi thời điểm</option>
               <option value="today">Hôm nay</option>
@@ -526,6 +575,7 @@
             <select class="news-select" data-role="sort-filter">
               <option value="newest">Mới nhất</option>
               <option value="oldest">Cũ nhất</option>
+              <option value="source">Theo báo</option>
             </select>
             <button class="news-chip" data-role="bookmark-toggle" title="Xem bài đã lưu">
               <i class="fa-regular fa-bookmark"></i> Đã lưu <span class="news-chip-count" data-role="bookmark-count">0</span>
@@ -533,6 +583,13 @@
             <button class="news-chip" data-role="history-toggle" title="Xem lịch sử đọc">
               <i class="fa-solid fa-clock-rotate-left"></i> Đã đọc
             </button>
+          </div>
+
+          <div class="news-stats" data-role="stats">
+            <div class="news-stat-item"><i class="fa-solid fa-newspaper"></i><span data-role="stat-total">0</span> bài</div>
+            <div class="news-stat-item"><i class="fa-solid fa-layer-group"></i><span data-role="stat-sources">0</span> nguồn</div>
+            <div class="news-stat-item"><i class="fa-solid fa-bookmark"></i><span data-role="stat-bookmarks">0</span> đã lưu</div>
+            <div class="news-stat-item"><i class="fa-solid fa-calendar-day"></i><span data-role="stat-today">0</span> bài hôm nay</div>
           </div>
 
           <div class="news-new-banner" data-role="new-banner" hidden>
@@ -558,8 +615,13 @@
         search: this.root.querySelector('.news-search-input'),
         refreshBtn: this.root.querySelector('.news-refresh-btn'),
         sourceFilter: this.root.querySelector('[data-role="source-filter"]'),
+        categoryFilter: this.root.querySelector('[data-role="category-filter"]'),
         rangeFilter: this.root.querySelector('[data-role="range-filter"]'),
         sortFilter: this.root.querySelector('[data-role="sort-filter"]'),
+        statTotal: this.root.querySelector('[data-role="stat-total"]'),
+        statSources: this.root.querySelector('[data-role="stat-sources"]'),
+        statBookmarks: this.root.querySelector('[data-role="stat-bookmarks"]'),
+        statToday: this.root.querySelector('[data-role="stat-today"]'),
         bookmarkToggle: this.root.querySelector('[data-role="bookmark-toggle"]'),
         bookmarkCount: this.root.querySelector('[data-role="bookmark-count"]'),
         historyToggle: this.root.querySelector('[data-role="history-toggle"]'),
@@ -716,6 +778,9 @@
             <button class="news-icon-btn news-bookmark-btn ${isBookmarked ? 'active' : ''}" title="Lưu bài viết">
               <i class="fa-${isBookmarked ? 'solid' : 'regular'} fa-bookmark"></i>
             </button>
+            <button class="news-icon-btn news-share-btn" title="Chia sẻ bài viết">
+              <i class="fa-solid fa-share-nodes"></i>
+            </button>
           </div>
         </div>
       `;
@@ -738,6 +803,10 @@
         e.stopPropagation();
         this.manager.toggleBookmark(article, e.currentTarget);
       });
+      card.querySelector('.news-share-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        this.manager.shareArticle(article);
+      });
 
       return card;
     }
@@ -751,6 +820,14 @@
     hideNewBanner() { this.el.newBanner.hidden = true; }
 
     updateBookmarkCount(n) { this.el.bookmarkCount.textContent = String(n); }
+
+    /** Cập nhật thanh Thống kê: tổng số bài / số nguồn / số bookmark / số bài hôm nay. */
+    updateStats({ total, sourceCount, bookmarkCount, todayCount }) {
+      if (this.el.statTotal) this.el.statTotal.textContent = String(total);
+      if (this.el.statSources) this.el.statSources.textContent = String(sourceCount);
+      if (this.el.statBookmarks) this.el.statBookmarks.textContent = String(bookmarkCount);
+      if (this.el.statToday) this.el.statToday.textContent = String(todayCount);
+    }
 
     setRefreshingState(isRefreshing) {
       this.el.refreshBtn.classList.toggle('news-spinning', isRefreshing);
@@ -900,6 +977,10 @@
         this.filter.sourceId = e.target.value;
         this._refreshView();
       });
+      el.categoryFilter.addEventListener('change', (e) => {
+        this.filter.category = e.target.value;
+        this._refreshView();
+      });
       el.rangeFilter.addEventListener('change', (e) => {
         this.filter.range = e.target.value;
         this._refreshView();
@@ -964,7 +1045,7 @@
         const { articles, errors } = await NewsAPI.fetchAll(NewsConfig.SOURCES);
 
         if (!articles.length && errors.length && this.store.size === 0) {
-          this.renderer.showError(`Không tải được tin tức (${errors.length} nguồn lỗi). Kiểm tra RSS Proxy trong NewsConfig.`);
+          this.renderer.showError(`Không tải được tin tức (${errors.length} nguồn lỗi, đã thử toàn bộ RSS Proxy trong NewsConfig.RSS_PROXY_LIST).`);
           return;
         }
 
@@ -1008,7 +1089,8 @@
     /** Áp dụng filter + search + (chế độ bookmark) lên toàn bộ store rồi render lại từ đầu. */
     _refreshView() {
       if (!this.renderer) return;
-      let list = this.store.getAll();
+      const all = this.store.getAll();
+      let list = all;
       if (this._bookmarkModeOn) {
         list = list.filter(a => this.bookmark.has(a.id));
       }
@@ -1016,6 +1098,17 @@
       list = list.filter(a => this.search.matches(a));
       this.renderer.renderList(list);
       this.renderer.updateBookmarkCount(this.bookmark.getIds().length);
+
+      // Thống kê tính trên TOÀN BỘ dữ liệu đang có trong store (không phụ thuộc filter hiện tại)
+      // để người dùng luôn thấy bức tranh tổng thể.
+      const sourceIdsPresent = new Set(all.map(a => a.sourceId));
+      const todayCount = all.filter(a => NewsUtils.isWithinRange(a.pubDate, 'today')).length;
+      this.renderer.updateStats({
+        total: all.length,
+        sourceCount: sourceIdsPresent.size,
+        bookmarkCount: this.bookmark.getIds().length,
+        todayCount
+      });
     }
 
     /* ---------------------------------------------------------------- Actions ----------- */
@@ -1026,6 +1119,36 @@
       window.open(article.link, '_blank', 'noopener,noreferrer');
       const card = this.renderer.el.list.querySelector(`[data-id="${article.id}"] .news-card-title`);
       if (card) card.classList.add('news-card-title-read');
+    }
+
+    /**
+     * Chia sẻ bài viết: ưu tiên navigator.share() (Web Share API, hoạt động
+     * tốt trên mobile). Nếu trình duyệt không hỗ trợ (hầu hết desktop),
+     * fallback copy link vào clipboard rồi báo toast.
+     */
+    async shareArticle(article) {
+      const shareData = {
+        title: article.title,
+        text: `${article.title} — ${article.source}`,
+        url: article.link
+      };
+      if (navigator.share) {
+        try {
+          await navigator.share(shareData);
+        } catch (err) {
+          // Người dùng bấm huỷ chia sẻ (AbortError) -> im lặng, không phải lỗi thật.
+          if (err && err.name !== 'AbortError') {
+            this._toast('Không thể chia sẻ bài viết');
+          }
+        }
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(article.link);
+        this._toast('Đã sao chép liên kết bài viết');
+      } catch (err) {
+        this._toast('Không thể sao chép liên kết');
+      }
     }
 
     toggleBookmark(article, btnEl) {
@@ -1113,6 +1236,14 @@
     .news-chip:hover{ color:var(--accent); border-color:var(--accent); }
     .news-chip.active{ background:var(--accent); color:#fff; border-color:var(--accent); }
     .news-chip-count{ background:rgba(0,0,0,0.12); border-radius:999px; padding:1px 7px; font-size:11px; }
+
+    .news-stats{
+      display:flex; gap:18px; flex-wrap:wrap; padding:10px 14px; border-radius:var(--radius-sm);
+      background:var(--card-bg); border:1px solid var(--card-border); font-size:12.5px; color:var(--text-muted); font-weight:600;
+    }
+    .news-stat-item{ display:flex; align-items:center; gap:7px; }
+    .news-stat-item i{ color:var(--accent); font-size:13px; }
+    .news-stat-item span{ color:var(--text-main); font-weight:800; font-size:13.5px; }
 
     .news-new-banner{
       display:flex; align-items:center; justify-content:center; gap:8px; padding:10px; cursor:pointer;
