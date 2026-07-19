@@ -8,6 +8,19 @@
  *
  *   <script src="essay-grader.js"></script>
  *
+ * NHẬN DIỆN ĐĂNG NHẬP / ADMIN (đã làm linh hoạt hơn)
+ * ----------------------------------------------------------------------------
+ * Nếu nút "Nộp bài" hoặc tab "Quản lý bài nộp" không hiện dù đã đăng nhập,
+ * nguyên nhân gần như luôn là do module không nhận ra đúng cơ chế Auth của
+ * trang. Hàm resolveAuthUser()/resolveIsAdmin() bên dưới đã thử lần lượt
+ * nhiều kiểu phổ biến (AuthManager.currentUser, AuthManager.getCurrentUser(),
+ * AuthManager.user, fbAuth.currentUser, firebase.auth().currentUser,
+ * global.currentUser; và AuthManager.isAdmin(), AuthManager.role,
+ * currentUser.role...). Nếu trang bạn dùng một biến/hàm khác hẳn, mở
+ * Console gõ `typeof AuthManager` / `AuthManager` để xem cấu trúc thật, rồi
+ * bổ sung đúng field đó vào 2 hàm này (module sẽ tự log cảnh báo ra Console
+ * nếu sau ~15s vẫn không nhận diện được user).
+ *
  * LUỒNG HOẠT ĐỘNG (workflow mới)
  * ----------------------------------------------------------------------------
  * 1. Học viên vào tab "Chấm bài luận AI" → upload Assignment/Rubric/Answer Key/
@@ -645,12 +658,78 @@ nếu Rubric không nêu, dùng thang 10.
     return !!(global.fbDb && global.firebase && global.firebase.firestore);
   }
 
+  // --------------------------------------------------------------------
+  // Nhận diện User đăng nhập / quyền Admin.
+  // --------------------------------------------------------------------
+  // Bản trước chỉ nhận đúng 1 dạng: global.AuthManager.currentUser /
+  // global.AuthManager.isAdmin(). Nếu trang thực tế dùng biến/hàm tên khác
+  // (hoặc AuthManager khởi tạo trễ), toàn bộ "Nộp bài" + "Quản lý bài nộp"
+  // bị ẩn dù người dùng đã đăng nhập/là admin thật. Hàm dưới đây thử LẦN
+  // LƯỢT nhiều kiểu cấu trúc AuthManager phổ biến, không đổi bất kỳ logic
+  // nghiệp vụ nào khác trong file.
+  function resolveAuthUser() {
+    const AM = global.AuthManager;
+    if (AM) {
+      if (AM.currentUser) return AM.currentUser;
+      if (typeof AM.getCurrentUser === "function") {
+        const u = AM.getCurrentUser();
+        if (u) return u;
+      }
+      if (AM.user) return AM.user;
+    }
+    // Firebase Auth trực tiếp (không qua AuthManager) — vài trang gọi thẳng
+    if (global.fbAuth && global.fbAuth.currentUser) return global.fbAuth.currentUser;
+    if (global.firebase && typeof global.firebase.auth === "function") {
+      try {
+        const u = global.firebase.auth().currentUser;
+        if (u) return u;
+      } catch (e) { /* firebase.auth() có thể chưa init — bỏ qua */ }
+    }
+    // Biến global rời rạc mà một số trang dùng thay AuthManager
+    if (global.currentUser) return global.currentUser;
+    return null;
+  }
+
   function currentAuthUser() {
-    return global.AuthManager && global.AuthManager.currentUser ? global.AuthManager.currentUser : null;
+    return resolveAuthUser();
+  }
+
+  function resolveIsAdmin(user) {
+    const AM = global.AuthManager;
+    if (AM) {
+      if (typeof AM.isAdmin === "function") {
+        try { if (AM.isAdmin()) return true; } catch (e) { /* bỏ qua lỗi hàm isAdmin nếu có */ }
+      }
+      if (AM.isAdmin === true) return true;
+      if (AM.role === "admin") return true;
+      if (AM.currentUser && (AM.currentUser.isAdmin === true || AM.currentUser.role === "admin")) return true;
+    }
+    if (typeof global.isAdmin === "function") {
+      try { if (global.isAdmin()) return true; } catch (e) { /* bỏ qua */ }
+    }
+    if (global.isAdmin === true) return true;
+    if (global.currentUserRole === "admin") return true;
+    if (user && (user.isAdmin === true || user.role === "admin")) return true;
+    return false;
   }
 
   function isCurrentUserAdmin() {
-    return !!(global.AuthManager && typeof global.AuthManager.isAdmin === "function" && global.AuthManager.isAdmin());
+    return resolveIsAdmin(currentAuthUser());
+  }
+
+  // Log 1 lần (chỉ khi hết thời gian chờ mà vẫn không thấy user) để bạn dễ
+  // debug đúng nguyên nhân thật trên trang của mình — không ảnh hưởng UI.
+  let _egAuthDebugLogged = false;
+  function debugAuthOnceIfMissing() {
+    if (_egAuthDebugLogged) return;
+    _egAuthDebugLogged = true;
+    if (!currentAuthUser()) {
+      console.warn(
+        "[essay-grader] Không nhận diện được user đăng nhập qua AuthManager/fbAuth/firebase.auth()/currentUser. " +
+        "Nếu bạn CHẮC CHẮN đã đăng nhập, hãy mở Console gõ `typeof AuthManager` và `AuthManager` để xem cấu trúc " +
+        "thật, rồi bổ sung đúng field/hàm đó vào hàm resolveAuthUser()/resolveIsAdmin() trong essay-grader.js."
+      );
+    }
   }
 
   // Nộp bài: LUÔN tạo 1 document MỚI (add), không bao giờ overwrite document
@@ -1530,8 +1609,11 @@ nếu Rubric không nêu, dùng thang 10.
 
   function waitForAuth(cb, tries) {
     tries = tries || 0;
-    if (global.AuthManager && global.AuthManager.currentUser) return cb();
-    if (tries > 60) return cb(); // ~15s, vẫn gọi lại để UI không treo mãi ở trạng thái "đang tải"
+    if (resolveAuthUser()) return cb();
+    if (tries > 60) { // ~15s, vẫn gọi lại để UI không treo mãi ở trạng thái "đang tải"
+      debugAuthOnceIfMissing();
+      return cb();
+    }
     setTimeout(() => waitForAuth(cb, tries + 1), 250);
   }
 
