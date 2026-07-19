@@ -30,10 +30,10 @@
     // Danh sách nguồn tin. Thêm/xoá 1 phần tử = thêm/xoá 1 nguồn báo.
     SOURCES: [
       { id: 'vnexpress',   name: 'VNExpress',            rss: 'https://vnexpress.net/rss/tin-moi-nhat.rss',              category: 'Tổng hợp'   },
-      { id: 'cafef',       name: 'CafeF',                 rss: 'https://cafef.vn/trang-chu.rss',                          category: 'Kinh tế'    },
-      { id: 'cafebiz',     name: 'CafeBiz',               rss: 'https://cafebiz.vn/trang-chu.rss',                        category: 'Kinh doanh' },
-      { id: 'vneconomy',   name: 'VnEconomy',             rss: 'https://vneconomy.vn/rss/home.rss',                       category: 'Kinh tế'    },
-      { id: 'baodautu',    name: 'Báo Đầu Tư',            rss: 'https://baodautu.vn/rss/trang-chu-82.rss',                category: 'Đầu tư'     },
+      { id: 'cafef',       name: 'CafeF',                 rss: 'https://cafef.vn/home.rss',                               category: 'Kinh tế'    },
+      { id: 'cafebiz',     name: 'CafeBiz',               rss: 'https://cafebiz.vn/rss/home.rss',                         category: 'Kinh doanh' },
+      { id: 'vneconomy',   name: 'VnEconomy',             rss: 'https://vneconomy.vn/tin-moi.rss',                        category: 'Kinh tế'    },
+      { id: 'baodautu',    name: 'Báo Đầu Tư',            rss: 'https://baodautu.vn/rss/tin-moi-nhat.rss',                category: 'Đầu tư'     },
       { id: 'saigontimes', name: 'The Saigon Times',      rss: 'https://thesaigontimes.vn/feed/',                         category: 'Kinh tế'    },
       { id: 'vietstock',   name: 'Vietstock',             rss: 'https://vietstock.vn/rss/tin-moi.rss',                    category: 'Chứng khoán'},
       { id: 'vnfinance',   name: 'VietnamFinance',        rss: 'https://vietnamfinance.vn/rss/home.rss',                  category: 'Tài chính'  },
@@ -41,7 +41,8 @@
       { id: 'tnck',        name: 'Tin Nhanh Chứng Khoán', rss: 'https://www.tinnhanhchungkhoan.vn/rss/trang-chu.rss',     category: 'Chứng khoán'},
       { id: 'ktck',        name: 'Kinh Tế Chứng Khoán',   rss: 'https://kinhtechungkhoan.vn/rss/home.rss',                category: 'Chứng khoán'},
       { id: 'baomoi',      name: 'Báo Mới',               rss: 'https://baomoi.com/rss/home.rss',                         category: 'Tổng hợp'   },
-      { id: 'thoibaokt',   name: 'Thời báo Kinh tế',      rss: 'https://thoibaokinhdoanh.vn/rss/home.rss',                category: 'Kinh tế'    }
+      { id: 'thoibaokt',   name: 'Thời báo Kinh tế',      rss: 'https://thoibaokinhdoanh.vn/rss/home.rss',                category: 'Kinh tế'    },
+      { id: 'nguoiquansat',name: 'Người Quan Sát',        rss: 'https://nguoiquansat.vn/rss/home.rss',                    category: 'Tài chính'  }
     ],
 
     // ---- RSS PROXY (đa proxy, tự chuyển khi lỗi) ------------------------
@@ -50,9 +51,10 @@
     //       'json' -> proxy trả JSON đã bọc sẵn (vd rss2json), đọc field items
     //       'auto' -> không chắc proxy trả gì: thử parse JSON trước, thất bại thì parse XML
     RSS_PROXY_LIST: [
+      { name: 'codetabs',    url: 'https://api.codetabs.com/v1/proxy?quest=',        mode: 'xml'  },
       { name: 'allorigins',  url: 'https://api.allorigins.win/raw?url=',              mode: 'xml'  },
-      { name: 'rss2json',    url: 'https://api.rss2json.com/v1/api.json?rss_url=',    mode: 'json' },
-      { name: 'corsproxy',   url: 'https://corsproxy.io/?url=',                       mode: 'auto' }
+      { name: 'corsproxy',   url: 'https://corsproxy.io/?url=',                       mode: 'auto' },
+      { name: 'rss2json',    url: 'https://api.rss2json.com/v1/api.json?rss_url=',    mode: 'json' }
     ],
 
     FETCH_TIMEOUT_MS: 15000,      // timeout mỗi request nguồn tin
@@ -258,9 +260,17 @@
       }
     }
 
-    /** Lấy tất cả nguồn song song, không để 1 nguồn lỗi làm hỏng cả batch. */
+    /**
+     * Lấy tất cả nguồn. Để tránh dội cùng lúc hàng chục request vào CÙNG một
+     * proxy dùng chung (dễ bị giới hạn tần suất phía proxy), mỗi nguồn được
+     * khởi động cách nhau một khoảng rất nhỏ (staggered start) thay vì bắn
+     * đồng thời 100% — nhưng vẫn chạy song song và không nguồn nào chặn nguồn nào
+     * (Promise.allSettled).
+     */
     static async fetchAll(sources) {
-      const results = await Promise.allSettled(sources.map(s => NewsAPI.fetchSource(s)));
+      const STAGGER_MS = 120;
+      const tasks = sources.map((s, i) => NewsAPI._delay(i * STAGGER_MS).then(() => NewsAPI.fetchSource(s)));
+      const results = await Promise.allSettled(tasks);
       const articles = [];
       const errors = [];
       results.forEach((r, i) => {
@@ -271,6 +281,10 @@
         }
       });
       return { articles, errors };
+    }
+
+    static _delay(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
     }
 
     /** Parse chế độ JSON (kiểu rss2json): { items: [{title,description,link,pubDate,guid,enclosure:{link}}] } */
@@ -1070,7 +1084,13 @@
         }
 
         if (errors.length) {
-          console.warn('[NewsManager] Một số nguồn lỗi:', errors.map(e => e.message));
+          const names = errors.map(e => e.source.name).join(', ');
+          console.warn('[NewsManager] Các nguồn lỗi:', errors.map(e => `${e.source.name}: ${e.message}`));
+          // Chỉ toast khi có bài (nếu không thì showError ở nhánh trên đã xử lý) —
+          // tránh làm phiền người dùng khi mọi thứ đều ổn.
+          if (articles.length && !silent) {
+            this._toast(`⚠️ ${errors.length} nguồn tạm thời không tải được: ${names}`);
+          }
         }
       } catch (err) {
         console.error('[NewsManager] Lỗi tải tin:', err);
