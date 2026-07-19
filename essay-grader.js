@@ -1700,6 +1700,19 @@ nếu Rubric không nêu, dùng thang 10.
     el.classList.remove("eg-active");
   }
 
+  // GHI CHÚ QUAN TRỌNG VỀ NGUYÊN NHÂN ADMIN BỊ MẤT TAB "QUẢN LÝ BÀI NỘP":
+  // Trên trang chính, `AuthManager.currentUser` được gán NGAY khi Firebase Auth
+  // xác định đăng nhập xong (onAuthStateChanged), NHƯNG `AuthManager.currentRole`
+  // (giá trị quyết định isAdmin()) chỉ được gán SAU MỘT NHỊP BẤT ĐỒNG BỘ KHÁC —
+  // sau khi đọc xong document trong collection "allowedUsers" từ Firestore.
+  // Bản trước của essay-grader.js chỉ gọi `isCurrentUserAdmin()` ĐÚNG 1 LẦN DUY
+  // NHẤT, ngay khi vừa thấy currentUser tồn tại — rất dễ rơi đúng vào lúc
+  // currentRole còn đang là "user" mặc định vì Firestore chưa kịp trả kết quả.
+  // Kết quả: dù tài khoản THỰC SỰ là admin, tab "Quản lý bài nộp" vẫn bị ẩn
+  // vĩnh viễn vì không có lần kiểm tra lại nào sau đó.
+  // Cách khắc phục: kiểm tra LẶP LẠI (poll) nhiều lần trong một khoảng thời
+  // gian đủ rộng, thay vì chỉ 1 lần, để luôn bắt kịp thời điểm currentRole
+  // được Firestore trả về và cập nhật đúng.
   function waitForAuth(cb, tries) {
     tries = tries || 0;
     if (resolveAuthUser()) return cb();
@@ -1989,20 +2002,53 @@ nếu Rubric không nêu, dùng thang 10.
 
     // ------------------------------------------------------------------
     // Hiện/ẩn tab Admin theo vai trò, và luôn khởi động 2 listener đếm badge
-    // ngay khi xác định được trạng thái đăng nhập (không cần đợi bấm vào tab)
+    // ngay khi xác định được trạng thái đăng nhập (không cần đợi bấm vào tab).
+    //
+    // QUAN TRỌNG: không chỉ kiểm tra 1 LẦN DUY NHẤT ngay khi vừa thấy
+    // currentUser — vì quyền Admin (currentRole) của trang được xác định qua
+    // 1 lần đọc Firestore (collection "allowedUsers") diễn ra SAU đó, không
+    // đồng thời với lúc currentUser xuất hiện. Nếu chỉ kiểm tra 1 lần, rất dễ
+    // rơi đúng lúc currentRole còn là "user" mặc định (do Firestore chưa kịp
+    // trả kết quả), khiến tab "Quản lý bài nộp" bị ẩn vĩnh viễn dù tài khoản
+    // thực sự là Admin. Ở đây dùng setInterval để KIỂM TRA LẶP LẠI trong một
+    // khoảng thời gian đủ rộng (~30s), cho tới khi cả 2 điều kiện (đã xác định
+    // đăng nhập + đã xác định xong quyền Admin) đều đã được xử lý.
     // ------------------------------------------------------------------
-    waitForAuth(() => {
-      const adminTabBtn = wrapper.querySelector("#eg-maintab-admin");
-      if (isCurrentUserAdmin()) {
-        adminTabBtn.style.display = "flex";
-        startAdminListener();
-      }
-      if (currentAuthUser()) {
-        startMineListener();
-      } else {
+    const adminTabBtn = wrapper.querySelector("#eg-maintab-admin");
+    let adminTabShown = false;
+
+    function syncAuthDependentUI() {
+      const user = currentAuthUser();
+
+      if (user) {
+        if (!mineListenerStarted) startMineListener();
+      } else if (!mineListenerStarted) {
         mineListEl.innerHTML = `<div class="eg-empty">Đăng nhập để nộp bài và xem lịch sử bài nộp của bạn.</div>`;
       }
-    });
+
+      if (!adminTabShown && isCurrentUserAdmin()) {
+        adminTabBtn.style.display = "flex";
+        startAdminListener();
+        adminTabShown = true;
+      }
+    }
+
+    syncAuthDependentUI(); // kiểm tra ngay lần đầu, không cần chờ tick đầu tiên
+    let authPollTries = 0;
+    const authPollTimer = setInterval(() => {
+      authPollTries++;
+      syncAuthDependentUI();
+      // Dừng poll khi mọi thứ đã sẵn sàng (đăng nhập + đã xác định xong quyền
+      // Admin — kể cả khi kết quả là "không phải Admin", ta vẫn cần dừng đúng
+      // lúc chứ không phải dừng ngay khi login xong), hoặc sau ~30s để tránh
+      // poll vô thời hạn không cần thiết.
+      if (authPollTries > 100) {
+        clearInterval(authPollTimer);
+        if (!currentAuthUser()) debugAuthOnceIfMissing();
+      } else if (adminTabShown && mineListenerStarted) {
+        clearInterval(authPollTimer);
+      }
+    }, 300);
   }
 
   if (document.readyState === "loading") {
