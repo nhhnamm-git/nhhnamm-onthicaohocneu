@@ -1,11 +1,15 @@
 /* ============================================================================
-   uses.js — Hướng dẫn sử dụng & Tóm tắt chức năng
+   uses.js — Hướng dẫn sử dụng & Tóm tắt chức năng (BẢN GỘP)
    ----------------------------------------------------------------------------
+   - Gộp từ 2 phiên bản trước đó (uses (1).js + uses (2).js) thành 1 file
+     duy nhất, không trùng lặp code.
    - Thuần JavaScript ES6+, không sửa HTML/CSS gốc, chỉ cần thêm:
        <script src="uses.js"></script>
-   - Nút "Hướng dẫn sử dụng" luôn hiển thị ngay khi trang tải xong (không phụ
-     thuộc đăng nhập), được chèn ngay cạnh khu vực label tên người dùng
-     (#userBadge) trên thanh header. Bấm vào là mở modal hướng dẫn ngay.
+   - Mục "Hướng dẫn sử dụng" được gắn dưới dạng DROPDOWN ngay tại khu vực
+     label tên người dùng trên header (#userBadge): bấm vào khu vực
+     avatar/tên sẽ mở ra 1 menu nhỏ với mục "Hướng dẫn sử dụng". Dropdown
+     này tự động gắn lại nếu #userBadge bị ẩn lúc đầu và chỉ xuất hiện sau
+     khi đăng nhập Google thành công (dùng MutationObserver theo dõi).
    - Nội dung hướng dẫn bao trùm toàn bộ chức năng hiện có của website, chia
      đúng theo các nhóm trong sidebar (Tổng quan / Học tập / Phân tích / Hệ
      thống) cộng thêm nhóm "Tiện ích mở rộng" (các module nạp thêm bằng JS
@@ -88,29 +92,58 @@
             margin-top: 10px;
         }
 
-        /* ---- Nút "Hướng dẫn sử dụng" cố định cạnh khu vực tên user ---- */
-        #userGuideBtn {
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            padding: 8px 14px;
-            border-radius: var(--radius-sm);
-            border: 1px solid var(--card-border);
+        /* ---- Dropdown gắn tại user-badge trên header ---- */
+        #userBadge {
+            position: relative;
+            cursor: pointer;
+            user-select: none;
+        }
+        #userBadge .ug-caret {
+            margin-left: 6px;
+            font-size: 10px;
+            color: var(--text-muted);
+            transition: transform .2s ease;
+        }
+        #userBadge.ug-open .ug-caret { transform: rotate(180deg); }
+        .ug-dropdown {
+            position: absolute;
+            top: calc(100% + 10px);
+            right: 0;
+            min-width: 200px;
             background: var(--card-bg-solid);
+            border: 1px solid var(--card-border);
+            border-radius: var(--radius-md);
+            box-shadow: var(--shadow-lg);
+            padding: 6px;
+            z-index: 500;
+            display: none;
+            opacity: 0;
+            transform: translateY(-6px);
+            transition: opacity .18s ease, transform .18s ease;
+        }
+        .ug-dropdown.show { display: block; opacity: 1; transform: translateY(0); }
+        .ug-dropdown-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            padding: 10px 12px;
+            border: none;
+            background: transparent;
             color: var(--text-main);
-            font-size: 13px;
-            font-weight: 700;
+            font-size: 13.5px;
+            font-weight: 600;
             font-family: inherit;
+            border-radius: var(--radius-sm);
             cursor: pointer;
             transition: var(--trans);
-            white-space: nowrap;
+            text-align: left;
         }
-        #userGuideBtn i { color: var(--accent); }
-        #userGuideBtn:hover { border-color: var(--accent); color: var(--accent); }
+        .ug-dropdown-item:hover { background: rgba(20,120,212,0.12); color: var(--accent); }
+        .ug-dropdown-item i { width: 16px; text-align: center; color: var(--accent); }
 
         @media (max-width: 600px) {
-            #userGuideBtn span { display: none; }
-            #userGuideBtn { padding: 8px 10px; }
+            .ug-dropdown { right: -10px; }
         }
     `;
     document.head.appendChild(style);
@@ -226,10 +259,20 @@
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
     /* ============================================================
-     * 3. Nút "Hướng dẫn sử dụng" — LUÔN hiển thị ngay khi trang tải,
-     *    KHÔNG phụ thuộc trạng thái đăng nhập (tránh bị ẩn theo #userBadge).
-     *    Được chèn cạnh khu vực tên user trên topbar-right.
+     * 3. Dropdown "Hướng dẫn sử dụng" gắn vào #userBadge (label tên user)
      * ============================================================ */
+    function buildDropdown() {
+        const dropdown = document.createElement('div');
+        dropdown.className = 'ug-dropdown';
+        dropdown.id = 'ugDropdown';
+        dropdown.innerHTML = `
+            <button class="ug-dropdown-item" id="userGuideBtn">
+                <i class="fa-solid fa-circle-info"></i> Hướng dẫn sử dụng
+            </button>
+        `;
+        return dropdown;
+    }
+
     function openModal() {
         const modal = document.getElementById('userGuideModal');
         if (modal) modal.classList.add('show');
@@ -240,27 +283,46 @@
         if (modal) modal.classList.remove('show');
     }
 
-    function injectGuideButton() {
-        if (document.getElementById('userGuideBtn')) return true; // đã chèn rồi, tránh trùng lặp
+    function closeDropdown(userBadge, dropdown) {
+        dropdown.classList.remove('show');
+        userBadge.classList.remove('ug-open');
+    }
 
-        const topbarRight = document.querySelector('.topbar-right');
-        if (!topbarRight) return false; // chưa thấy topbar, thử lại sau
-
-        const btn = document.createElement('button');
-        btn.id = 'userGuideBtn';
-        btn.type = 'button';
-        btn.innerHTML = '<i class="fa-solid fa-circle-info"></i><span>Hướng dẫn sử dụng</span>';
-        btn.title = 'Hướng dẫn sử dụng';
-        btn.addEventListener('click', openModal);
-
-        // Chèn ngay TRƯỚC khu vực tên user (#userBadge) nếu có, để nằm sát cạnh nó;
-        // nếu chưa có (chưa kịp render / chưa đăng nhập) thì chèn vào đầu topbar-right.
+    function attachToUserBadge() {
         const userBadge = document.getElementById('userBadge');
-        if (userBadge) {
-            topbarRight.insertBefore(btn, userBadge);
-        } else {
-            topbarRight.insertBefore(btn, topbarRight.firstChild);
-        }
+        if (!userBadge || userBadge.dataset.ugBound === '1') return false;
+
+        // Thêm mũi tên nhỏ để gợi ý đây là khu vực có thể bấm mở menu.
+        const caret = document.createElement('i');
+        caret.className = 'fa-solid fa-chevron-down ug-caret';
+        userBadge.appendChild(caret);
+
+        const dropdown = buildDropdown();
+        userBadge.appendChild(dropdown);
+        userBadge.dataset.ugBound = '1';
+
+        userBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = dropdown.classList.contains('show');
+            if (isOpen) {
+                closeDropdown(userBadge, dropdown);
+            } else {
+                dropdown.classList.add('show');
+                userBadge.classList.add('ug-open');
+            }
+        });
+
+        dropdown.querySelector('#userGuideBtn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeDropdown(userBadge, dropdown);
+            openModal();
+        });
+
+        // Bấm ra ngoài để đóng dropdown.
+        document.addEventListener('click', (e) => {
+            if (!userBadge.contains(e.target)) closeDropdown(userBadge, dropdown);
+        });
+
         return true;
     }
 
@@ -279,22 +341,22 @@
     }
 
     /**
-     * .topbar-right luôn có sẵn trong HTML ngay từ đầu (không ẩn), nên bình
-     * thường chỉ cần gọi 1 lần là xong. Vẫn thêm MutationObserver dự phòng
-     * để tự chèn lại nếu có đoạn code khác trong trang render/ghi đè lại
-     * header sau này (ví dụ sau khi đăng nhập xong).
+     * #userBadge có thể bị ẩn (style="display:none;") lúc trang vừa tải, và chỉ
+     * được hiện ra sau khi đăng nhập Google thành công. Dùng MutationObserver để
+     * tự gắn dropdown ngay khi phần tử này xuất hiện/hiển thị, không cần sửa
+     * logic đăng nhập hiện có.
      */
-    function watchTopbar() {
-        if (injectGuideButton()) return;
+    function watchUserBadge() {
+        if (attachToUserBadge()) return;
         const observer = new MutationObserver(() => {
-            if (injectGuideButton()) observer.disconnect();
+            if (attachToUserBadge()) observer.disconnect();
         });
-        observer.observe(document.body, { childList: true, subtree: true });
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
     }
 
     function init() {
         bindModalClose();
-        watchTopbar();
+        watchUserBadge();
     }
 
     if (document.readyState === 'loading') {
