@@ -1,15 +1,11 @@
 /* ============================================================================
-   uses.js — Hướng dẫn sử dụng & Tóm tắt chức năng (BẢN GỘP)
+   uses.js — Hướng dẫn sử dụng & Tóm tắt chức năng
    ----------------------------------------------------------------------------
-   - Gộp từ 2 phiên bản trước đó (uses (1).js + uses (2).js) thành 1 file
-     duy nhất, không trùng lặp code.
    - Thuần JavaScript ES6+, không sửa HTML/CSS gốc, chỉ cần thêm:
        <script src="uses.js"></script>
-   - Mục "Hướng dẫn sử dụng" được gắn dưới dạng DROPDOWN ngay tại khu vực
-     label tên người dùng trên header (#userBadge): bấm vào khu vực
-     avatar/tên sẽ mở ra 1 menu nhỏ với mục "Hướng dẫn sử dụng". Dropdown
-     này tự động gắn lại nếu #userBadge bị ẩn lúc đầu và chỉ xuất hiện sau
-     khi đăng nhập Google thành công (dùng MutationObserver theo dõi).
+   - Nút mở hướng dẫn được gắn NGAY TẠI khu vực label tên người dùng trên
+     thanh header (#userBadge): bấm vào khu vực avatar/tên sẽ mở ra 1 menu nhỏ
+     (dropdown) với mục duy nhất "Hướng dẫn sử dụng".
    - Nội dung hướng dẫn bao trùm toàn bộ chức năng hiện có của website, chia
      đúng theo các nhóm trong sidebar (Tổng quan / Học tập / Phân tích / Hệ
      thống) cộng thêm nhóm "Tiện ích mở rộng" (các module nạp thêm bằng JS
