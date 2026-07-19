@@ -854,16 +854,34 @@ nếu Rubric không nêu, dùng thang 10.
     return resolveDb().collection(CONFIG.firestoreCollection).add(docData);
   }
 
+  // LƯU Ý QUAN TRỌNG: KHÔNG dùng .where("studentUid","==",...).orderBy("submittedAt","desc")
+  // trong cùng 1 query Firestore. Kết hợp WHERE (đẳng thức) trên 1 field với ORDER BY
+  // trên field KHÁC luôn đòi hỏi phải có "composite index" được tạo thủ công trong
+  // Firebase Console — nếu chưa tạo, Firestore trả lỗi "The query requires an index..."
+  // và onSnapshot rơi vào nhánh lỗi vĩnh viễn, khiến giao diện luôn hiển thị "chưa có
+  // lịch sử" / "chưa nhận được nhận xét" dù thực ra dữ liệu đã được lưu đúng. Để tránh
+  // bắt người dùng phải tạo index thủ công, ta CHỈ where() (dùng single-field index tự
+  // động có sẵn của Firestore), rồi sắp xếp lại theo submittedAt ngay trên client.
+  function sortByTimeDesc(items) {
+    return items.slice().sort((a, b) => {
+      const ta = a.submittedAt?.toMillis ? a.submittedAt.toMillis() : (a.submittedAt instanceof Date ? a.submittedAt.getTime() : 0);
+      const tb = b.submittedAt?.toMillis ? b.submittedAt.toMillis() : (b.submittedAt instanceof Date ? b.submittedAt.getTime() : 0);
+      return tb - ta;
+    });
+  }
+
   function listenMySubmissions(onChange, onError) {
     if (!firestoreReady()) return () => {};
     const user = currentAuthUser();
     if (!user) return () => {};
     return resolveDb().collection(CONFIG.firestoreCollection)
       .where("studentUid", "==", user.uid)
-      .orderBy("submittedAt", "desc")
       .onSnapshot(
-        (snap) => onChange(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
-        (err) => { console.error("[essay-grader] listenMySubmissions:", err); if (onError) onError(err); }
+        (snap) => onChange(sortByTimeDesc(snap.docs.map((d) => ({ id: d.id, ...d.data() })))),
+        (err) => {
+          console.error("[essay-grader] listenMySubmissions:", err);
+          if (onError) onError(err);
+        }
       );
   }
 
