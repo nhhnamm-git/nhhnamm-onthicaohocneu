@@ -8,18 +8,27 @@
  *
  *   <script src="essay-grader.js"></script>
  *
- * LUỒNG HOẠT ĐỘNG
+ * LUỒNG HOẠT ĐỘNG (workflow mới)
  * ----------------------------------------------------------------------------
- * 1. Học viên vào tab "Chấm bài luận AI" → upload đề/rubric/đáp án/bài mẫu/bài
- *    làm → bấm "Chấm bài ngay" → AI (Claude) chấm và phân tích.
- * 2. Học viên bấm "Gửi bài cho Admin" → bài làm + kết quả AI được lưu lên
- *    Firestore (collection "essaySubmissions"), trạng thái "pending".
+ * 1. Học viên vào tab "Chấm bài luận AI" → upload Assignment/Rubric/Answer Key/
+ *    Example Essay/Knowledge Base/Student Essay → bấm "Chấm bài bằng AI" → AI
+ *    (Claude/Gemini) chấm và trả về toàn bộ kết quả.
+ * 2. Sau khi AI chấm xong, nút "Nộp bài" xuất hiện. Học viên bấm "Nộp bài" →
+ *    TOÀN BỘ dữ liệu (thông tin user, toàn bộ tài liệu đã upload, toàn bộ JSON
+ *    AI trả về, mốc thời gian, trạng thái) được lưu thành 1 document MỚI
+ *    trong Firestore (collection "essaySubmissions"), status = "submitted".
+ *    MỖI LẦN nộp luôn tạo document mới (add, không overwrite) → lịch sử chấm
+ *    của học viên (nhiều submission cho cùng 1 bài) luôn được giữ lại đầy đủ.
  * 3. Admin (tài khoản có role=admin trong collection "allowedUsers", giống hệ
- *    thống hiện tại của app) vào cùng tab, thấy thêm mục "Duyệt bài học viên"
- *    — danh sách realtime tất cả bài đã nộp, xem lại bài + nhận xét của AI,
- *    viết nhận xét riêng, bấm "Gửi nhận xét".
- * 4. Học viên xem lại ở mục "Bài đã nộp của tôi" — thấy nhận xét của Admin
- *    xuất hiện realtime (không cần tải lại trang) nhờ Firestore onSnapshot.
+ *    thống hiện tại của app) vào cùng tab, thấy thêm mục "Quản lý bài nộp" —
+ *    danh sách realtime tất cả bài đã nộp (tên, email, ngày nộp, điểm AI,
+ *    trạng thái), có thể lọc Pending/Reviewed/All, tìm theo tên/email, sắp
+ *    xếp Mới nhất/Cũ nhất/Điểm AI. Mở 1 submission để xem đầy đủ thông tin
+ *    user, đầy đủ tài liệu gốc, đầy đủ kết quả AI (không rút gọn), rồi nhập
+ *    Điểm giáo viên (tuỳ chọn) + Nhận xét → bấm "Gửi nhận xét".
+ * 4. Học viên xem lại ở mục "Lịch sử bài nộp" — toàn bộ submission của chính
+ *    mình (không xem được của người khác), thấy Nhận xét của giáo viên xuất
+ *    hiện realtime (không cần tải lại trang) nhờ Firestore onSnapshot.
  *
  * YÊU CẦU BẮT BUỘC VỀ FIRESTORE SECURITY RULES
  * ----------------------------------------------------------------------------
@@ -33,8 +42,12 @@
  *       return isSignedIn() &&
  *         get(/databases/$(database)/documents/allowedUsers/$(request.auth.token.email.lower())).data.role == 'admin';
  *     }
+ *     // Học viên: chỉ được TẠO (mỗi lần nộp = 1 document mới) và ĐỌC bài của
+ *     // chính mình. KHÔNG được update/delete — kể cả sửa lại bài đã nộp.
  *     allow create: if isSignedIn() && request.resource.data.studentUid == request.auth.uid;
  *     allow read:   if isSignedIn() && (resource.data.studentUid == request.auth.uid || isAdmin());
+ *     // Admin: đọc toàn bộ + update (để ghi teacherScore/teacherComment khi
+ *     // review). Không ai được delete — lịch sử chấm phải được giữ vĩnh viễn.
  *     allow update: if isSignedIn() && isAdmin();
  *     allow delete: if false;
  *   }
@@ -640,32 +653,48 @@ nếu Rubric không nêu, dùng thang 10.
     return !!(global.AuthManager && typeof global.AuthManager.isAdmin === "function" && global.AuthManager.isAdmin());
   }
 
+  // Nộp bài: LUÔN tạo 1 document MỚI (add), không bao giờ overwrite document
+  // cũ — nhờ vậy lịch sử chấm (Submission A, B, C... của cùng 1 học viên) được
+  // lưu đầy đủ, không mất dữ liệu lần chấm trước.
   async function submitToAdmin(payload) {
     if (!firestoreReady()) throw new Error("Chưa kết nối được Firestore.");
     const user = currentAuthUser();
-    if (!user) throw new Error("Bạn cần đăng nhập để nộp bài cho Admin.");
+    if (!user) throw new Error("Bạn cần đăng nhập để nộp bài.");
 
+    const now = global.firebase.firestore.FieldValue.serverTimestamp();
     const docData = {
+      // --- Thông tin User ---
       studentUid: user.uid,
       studentEmail: user.email || "",
       studentName: user.displayName || user.email || "Học viên",
       studentAvatar: user.photoURL || "",
-      assignmentName: payload.assignmentName || "",
-      studentEssayName: payload.studentEssayName || "",
-      studentEssayContent: payload.studentEssayContent || "",
+      // --- Thông tin bài (toàn bộ tài liệu đã upload, không chỉ tên file) ---
+      assignment: payload.assignment || null,
+      rubric: payload.rubric || null,
+      answerKey: payload.answerKey || null,
+      exampleEssays: payload.exampleEssays || [],
+      knowledgeBase: payload.knowledgeBase || [],
+      studentEssay: payload.studentEssay || null,
+      // --- Thông tin AI: giữ toàn bộ JSON AI trả về trong aiResult, đồng thời
+      // tách riêng aiScore ra field cấp cao nhất để lọc/sắp xếp nhanh hơn ---
       aiResult: payload.aiResult || null,
-      status: "pending",
-      adminFeedback: "",
-      adminScore: null,
-      submittedAt: global.firebase.firestore.FieldValue.serverTimestamp(),
+      aiScore: payload.aiResult && payload.aiResult.totalScore != null ? payload.aiResult.totalScore : null,
+      // --- Nhận xét giáo viên (rỗng cho tới khi Admin duyệt) ---
+      teacherScore: null,
+      teacherComment: "",
+      // --- Trạng thái ---
+      status: "submitted",
+      // --- Thời gian ---
+      submittedAt: now,
+      createdAt: now,
+      updatedAt: now,
       reviewedAt: null,
-      reviewedByUid: null,
-      reviewedByName: null,
+      reviewedBy: null,
     };
 
     const approxBytes = new Blob([JSON.stringify(docData)]).size;
     if (approxBytes > CONFIG.maxDocBytes) {
-      throw new Error("Bài làm + kết quả AI quá lớn để gửi (vượt giới hạn ~1MB của Firestore). Hãy rút gọn bài làm hoặc số lượng bài mẫu/knowledge base trước khi chấm.");
+      throw new Error("Bài nộp (toàn bộ tài liệu + kết quả AI) quá lớn để lưu (vượt giới hạn ~1MB của Firestore). Hãy rút gọn Rubric/Đáp án/Bài mẫu/Knowledge Base/Bài làm rồi chấm và nộp lại.");
     }
 
     return global.fbDb.collection(CONFIG.firestoreCollection).add(docData);
@@ -694,17 +723,18 @@ nếu Rubric không nêu, dùng thang 10.
       );
   }
 
-  async function sendFeedback(submissionId, feedbackText, adminScore) {
+  async function sendFeedback(submissionId, feedbackText, teacherScore) {
     if (!firestoreReady()) throw new Error("Chưa kết nối được Firestore.");
     const user = currentAuthUser();
     if (!user) throw new Error("Bạn cần đăng nhập.");
+    const now = global.firebase.firestore.FieldValue.serverTimestamp();
     return global.fbDb.collection(CONFIG.firestoreCollection).doc(submissionId).update({
       status: "reviewed",
-      adminFeedback: feedbackText || "",
-      adminScore: (adminScore === "" || adminScore == null || isNaN(adminScore)) ? null : Number(adminScore),
-      reviewedAt: global.firebase.firestore.FieldValue.serverTimestamp(),
-      reviewedByUid: user.uid,
-      reviewedByName: user.displayName || user.email || "Admin",
+      teacherComment: feedbackText || "",
+      teacherScore: (teacherScore === "" || teacherScore == null || isNaN(teacherScore)) ? null : Number(teacherScore),
+      reviewedAt: now,
+      reviewedBy: user.displayName || user.email || "Giáo viên",
+      updatedAt: now,
     });
   }
 
@@ -1081,8 +1111,8 @@ nếu Rubric không nêu, dùng thang 10.
 
     <div class="eg-maintabs" id="eg-maintabs">
       <div class="eg-maintab eg-active-maintab" data-maintab="grade"><i class="fa-solid fa-wand-magic-sparkles"></i> Chấm bài mới</div>
-      <div class="eg-maintab" data-maintab="mine"><i class="fa-solid fa-inbox"></i> Bài đã nộp của tôi <span class="eg-count" id="eg-count-mine">0</span></div>
-      <div class="eg-maintab" data-maintab="admin" id="eg-maintab-admin" style="display:none;"><i class="fa-solid fa-user-shield"></i> Duyệt bài học viên <span class="eg-count" id="eg-count-admin">0</span></div>
+      <div class="eg-maintab" data-maintab="mine"><i class="fa-solid fa-inbox"></i> Lịch sử bài nộp <span class="eg-count" id="eg-count-mine">0</span></div>
+      <div class="eg-maintab" data-maintab="admin" id="eg-maintab-admin" style="display:none;"><i class="fa-solid fa-user-shield"></i> Quản lý bài nộp <span class="eg-count" id="eg-count-admin">0</span></div>
     </div>
 
     <!-- ================= TAB: CHẤM BÀI MỚI ================= -->
@@ -1171,8 +1201,8 @@ nếu Rubric không nêu, dùng thang 10.
       <div class="eg-results-wrap" id="eg-results-wrap">
         <div class="eg-card" id="eg-submit-admin-card">
           <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
-            <div class="eg-hint" style="margin:0;" id="eg-submit-admin-hint">Gửi bài làm này (kèm nhận xét của AI) cho Admin xem và cho ý kiến.</div>
-            <button class="eg-btn eg-btn-success" id="eg-submit-admin-btn"><i class="fa-solid fa-paper-plane"></i> Gửi bài cho Admin</button>
+            <div class="eg-hint" style="margin:0;" id="eg-submit-admin-hint">Nộp bài làm này (kèm toàn bộ tài liệu và kết quả AI) — mỗi lần nộp sẽ tạo 1 bản ghi mới, giáo viên sẽ xem và cho nhận xét.</div>
+            <button class="eg-btn eg-btn-success" id="eg-submit-admin-btn"><i class="fa-solid fa-paper-plane"></i> Nộp bài</button>
           </div>
           <div class="eg-toast" id="eg-submit-toast"></div>
           <div class="eg-error" id="eg-submit-error"></div>
@@ -1181,22 +1211,41 @@ nếu Rubric không nêu, dùng thang 10.
       </div>
     </div>
 
-    <!-- ================= TAB: BÀI ĐÃ NỘP CỦA TÔI ================= -->
+    <!-- ================= TAB: LỊCH SỬ BÀI NỘP ================= -->
     <div class="eg-mainpanel" data-mainpanel="mine">
       <div class="eg-card" id="eg-mine-list-card">
-        <h3><i class="fa-solid fa-inbox"></i> Bài đã nộp của tôi</h3>
+        <h3><i class="fa-solid fa-inbox"></i> Lịch sử bài nộp</h3>
         <div id="eg-mine-list"><div class="eg-empty">Đang tải...</div></div>
       </div>
       <div id="eg-mine-detail" style="display:none;"></div>
     </div>
 
-    <!-- ================= TAB: DUYỆT BÀI HỌC VIÊN (ADMIN) ================= -->
+    <!-- ================= TAB: QUẢN LÝ BÀI NỘP (ADMIN) ================= -->
     <div class="eg-mainpanel" data-mainpanel="admin">
       <div class="eg-card" id="eg-admin-list-card">
-        <h3><i class="fa-solid fa-user-shield"></i> Bài học viên đã nộp</h3>
-        <label style="font-size:12px; font-weight:600; cursor:pointer; display:inline-flex; gap:6px; align-items:center; margin-bottom:12px;">
-          <input type="checkbox" id="eg-admin-onlypending" style="width:auto;" checked/> Chỉ hiện bài chờ duyệt
-        </label>
+        <h3><i class="fa-solid fa-user-shield"></i> Quản lý bài nộp</h3>
+        <div class="eg-config-row" style="margin-bottom:14px;">
+          <div class="eg-field" style="max-width:180px;">
+            <label>Trạng thái</label>
+            <select id="eg-admin-filter">
+              <option value="pending" selected>Pending</option>
+              <option value="reviewed">Reviewed</option>
+              <option value="all">All</option>
+            </select>
+          </div>
+          <div class="eg-field" style="min-width:200px;">
+            <label>Tìm kiếm</label>
+            <input type="text" id="eg-admin-search" placeholder="Tên hoặc email học viên..." />
+          </div>
+          <div class="eg-field" style="max-width:180px;">
+            <label>Sắp xếp</label>
+            <select id="eg-admin-sort">
+              <option value="newest" selected>Mới nhất</option>
+              <option value="oldest">Cũ nhất</option>
+              <option value="score">Điểm AI</option>
+            </select>
+          </div>
+        </div>
         <div id="eg-admin-list"><div class="eg-empty">Đang tải...</div></div>
       </div>
       <div id="eg-admin-detail" style="display:none;"></div>
@@ -1208,20 +1257,20 @@ nếu Rubric không nêu, dùng thang 10.
   // 9. RENDER DANH SÁCH BÀI NỘP
   // ==========================================================================
   function renderMineList(container, items, onOpen) {
-    if (!items.length) { container.innerHTML = `<div class="eg-empty">Bạn chưa nộp bài nào. Hãy chấm bài ở tab "Chấm bài mới" rồi bấm "Gửi bài cho Admin".</div>`; return; }
+    if (!items.length) { container.innerHTML = `<div class="eg-empty">Bạn chưa nộp bài nào. Hãy chấm bài ở tab "Chấm bài mới" rồi bấm "Nộp bài".</div>`; return; }
     container.innerHTML = items.map((it) => `
       <div class="eg-submission-card" data-id="${it.id}">
         <div class="eg-submission-top">
           <div>
-            <div class="eg-submission-title">${escapeHtml(it.studentEssayName || "Bài làm")} ${it.assignmentName ? `— ${escapeHtml(it.assignmentName)}` : ""}</div>
-            <div class="eg-submission-meta">Nộp lúc ${formatDate(it.submittedAt)} · Điểm AI: ${it.aiResult?.totalScore ?? "-"}/${it.aiResult?.maxScore ?? CONFIG.maxScoreDefault}</div>
+            <div class="eg-submission-title">${escapeHtml(it.studentEssay?.name || "Bài làm")} ${it.assignment?.name ? `— ${escapeHtml(it.assignment.name)}` : ""}</div>
+            <div class="eg-submission-meta">Nộp lúc ${formatDate(it.submittedAt)} · Điểm AI: ${it.aiScore ?? it.aiResult?.totalScore ?? "-"}/${it.aiResult?.maxScore ?? CONFIG.maxScoreDefault}</div>
           </div>
-          <span class="eg-pill ${it.status === "reviewed" ? "eg-pill-reviewed" : "eg-pill-pending"}">${it.status === "reviewed" ? "Đã có nhận xét" : "Đang chờ Admin"}</span>
+          <span class="eg-pill ${it.status === "reviewed" ? "eg-pill-reviewed" : "eg-pill-pending"}">${it.status === "reviewed" ? "Đã nhận phản hồi" : "Đang chờ giáo viên"}</span>
         </div>
         ${it.status === "reviewed" ? `
           <div class="eg-submission-feedback">
-            <strong>Nhận xét của ${escapeHtml(it.reviewedByName || "Admin")}${it.adminScore != null ? ` — Điểm: ${it.adminScore}` : ""}:</strong><br/>
-            ${escapeHtml(it.adminFeedback || "(không có nội dung)")}
+            <strong>Nhận xét của ${escapeHtml(it.reviewedBy || "giáo viên")}${it.teacherScore != null ? ` — Điểm: ${it.teacherScore}` : ""}:</strong><br/>
+            ${escapeHtml(it.teacherComment || "(không có nội dung)")}
           </div>` : ""}
       </div>`).join("");
     container.querySelectorAll(".eg-submission-card").forEach((card) => {
@@ -1229,17 +1278,40 @@ nếu Rubric không nêu, dùng thang 10.
     });
   }
 
-  function renderAdminList(container, items, onlyPending, onOpen) {
-    const filtered = onlyPending ? items.filter((i) => i.status !== "reviewed") : items;
-    if (!filtered.length) { container.innerHTML = `<div class="eg-empty">Không có bài nào.</div>`; return; }
+  // options: { filter: "pending"|"reviewed"|"all", search: string, sort: "newest"|"oldest"|"score" }
+  function renderAdminList(container, items, options, onOpen) {
+    const filter = options?.filter || "pending";
+    const search = (options?.search || "").trim().toLowerCase();
+    const sort = options?.sort || "newest";
+
+    let filtered = items;
+    if (filter === "pending") filtered = filtered.filter((i) => i.status !== "reviewed");
+    else if (filter === "reviewed") filtered = filtered.filter((i) => i.status === "reviewed");
+    // filter === "all" → giữ nguyên toàn bộ
+
+    if (search) {
+      filtered = filtered.filter((i) =>
+        (i.studentName || "").toLowerCase().includes(search) ||
+        (i.studentEmail || "").toLowerCase().includes(search)
+      );
+    }
+
+    filtered = filtered.slice().sort((a, b) => {
+      if (sort === "score") return (b.aiScore ?? b.aiResult?.totalScore ?? -Infinity) - (a.aiScore ?? a.aiResult?.totalScore ?? -Infinity);
+      const ta = a.submittedAt?.toMillis ? a.submittedAt.toMillis() : 0;
+      const tb = b.submittedAt?.toMillis ? b.submittedAt.toMillis() : 0;
+      return sort === "oldest" ? ta - tb : tb - ta;
+    });
+
+    if (!filtered.length) { container.innerHTML = `<div class="eg-empty">Không có bài nào phù hợp.</div>`; return; }
     container.innerHTML = filtered.map((it) => `
       <div class="eg-submission-card" data-id="${it.id}">
         <div class="eg-submission-top">
           <div>
             <div class="eg-submission-title">${escapeHtml(it.studentName || it.studentEmail)}</div>
-            <div class="eg-submission-meta">${escapeHtml(it.studentEssayName || "Bài làm")}${it.assignmentName ? ` — ${escapeHtml(it.assignmentName)}` : ""} · Nộp lúc ${formatDate(it.submittedAt)} · Điểm AI: ${it.aiResult?.totalScore ?? "-"}/${it.aiResult?.maxScore ?? CONFIG.maxScoreDefault}</div>
+            <div class="eg-submission-meta">${escapeHtml(it.studentEmail || "")} · ${escapeHtml(it.studentEssay?.name || "Bài làm")}${it.assignment?.name ? ` — ${escapeHtml(it.assignment.name)}` : ""} · Nộp lúc ${formatDate(it.submittedAt)} · Điểm AI: ${it.aiScore ?? it.aiResult?.totalScore ?? "-"}/${it.aiResult?.maxScore ?? CONFIG.maxScoreDefault}</div>
           </div>
-          <span class="eg-pill ${it.status === "reviewed" ? "eg-pill-reviewed" : "eg-pill-pending"}">${it.status === "reviewed" ? "Đã duyệt" : "Chờ duyệt"}</span>
+          <span class="eg-pill ${it.status === "reviewed" ? "eg-pill-reviewed" : "eg-pill-pending"}">${it.status === "reviewed" ? "Reviewed" : "Pending"}</span>
         </div>
       </div>`).join("");
     container.querySelectorAll(".eg-submission-card").forEach((card) => {
@@ -1247,23 +1319,57 @@ nếu Rubric không nêu, dùng thang 10.
     });
   }
 
+  // Hiển thị đầy đủ nội dung 1 file tài liệu (không rút gọn). Dùng chung cho
+  // cả trang chi tiết của User và của Admin.
+  function renderFileBlock(icon, title, file) {
+    if (!file || !file.content) return "";
+    return `
+      <div class="eg-card">
+        <h3><i class="fa-solid ${icon}"></i> ${title}${file.name ? ` — ${escapeHtml(file.name)}` : ""}</h3>
+        <div class="eg-essay-box">${escapeHtml(file.content)}</div>
+      </div>`;
+  }
+  // Hiển thị đầy đủ nội dung 1 nhóm nhiều file (Example Essays / Knowledge Base).
+  function renderFileListBlock(icon, title, files) {
+    if (!files || !files.length) return "";
+    return `
+      <div class="eg-card">
+        <h3><i class="fa-solid ${icon}"></i> ${title}</h3>
+        ${files.map((f, idx) => `
+          <div style="margin-bottom:${idx === files.length - 1 ? 0 : 12}px;">
+            <div class="eg-submission-meta" style="margin-bottom:4px;">${escapeHtml(f.name || `File ${idx + 1}`)}</div>
+            <div class="eg-essay-box">${escapeHtml(f.content || "")}</div>
+          </div>`).join("")}
+      </div>`;
+  }
+  // Sinh HTML cho toàn bộ khối "File" (Assignment/Rubric/Answer Key/Example
+  // Essay/Knowledge Base/Student Essay) của 1 submission — dùng chung cho cả
+  // trang chi tiết User và Admin, hiển thị giống hệt nhau, không rút gọn.
+  function buildSubmissionFilesHTML(item) {
+    return [
+      renderFileBlock("fa-file-lines", "Assignment (Đề bài)", item.assignment),
+      renderFileBlock("fa-list-check", "Rubric", item.rubric),
+      renderFileBlock("fa-key", "Answer Key (Đáp án)", item.answerKey),
+      renderFileListBlock("fa-copy", "Example Essay (Bài mẫu)", item.exampleEssays),
+      renderFileListBlock("fa-book", "Knowledge Base", item.knowledgeBase),
+      renderFileBlock("fa-pen-nib", "Student Essay (Bài làm)", item.studentEssay),
+    ].join("");
+  }
+
   function renderStudentDetail(container, item) {
     container.innerHTML = `
       <div class="eg-back-btn" id="eg-mine-back"><i class="fa-solid fa-arrow-left"></i> Quay lại danh sách</div>
       <div class="eg-card">
-        <div class="eg-submission-title" style="font-size:16px; margin-bottom:6px;">${escapeHtml(item.studentEssayName || "Bài làm")}</div>
+        <div class="eg-submission-title" style="font-size:16px; margin-bottom:6px;">${escapeHtml(item.studentEssay?.name || "Bài làm")}</div>
         <div class="eg-submission-meta">Nộp lúc ${formatDate(item.submittedAt)}</div>
         ${item.status === "reviewed" ? `
           <div class="eg-submission-feedback" style="margin-top:12px;">
-            <strong>Nhận xét của ${escapeHtml(item.reviewedByName || "Admin")}${item.adminScore != null ? ` — Điểm: ${item.adminScore}` : ""} (${formatDate(item.reviewedAt)}):</strong><br/>
-            ${escapeHtml(item.adminFeedback || "(không có nội dung)")}
-          </div>` : `<div class="eg-sub-note" style="margin-top:12px;">Bài đang chờ Admin xem và nhận xét.</div>`}
+            <strong>Nhận xét của ${escapeHtml(item.reviewedBy || "giáo viên")}${item.teacherScore != null ? ` — Điểm: ${item.teacherScore}` : ""} (${formatDate(item.reviewedAt)}):</strong><br/>
+            ${escapeHtml(item.teacherComment || "(không có nội dung)")}
+          </div>` : `<div class="eg-sub-note" style="margin-top:12px;">Đang chờ giáo viên xem và nhận xét.</div>`}
       </div>
       ${item.aiResult ? buildResultsBlockHTML(item.aiResult) : `<div class="eg-empty">Không có dữ liệu chấm AI.</div>`}
-      <div class="eg-card">
-        <h3><i class="fa-solid fa-file-lines"></i> Nội dung bài làm đã nộp</h3>
-        <div class="eg-essay-box">${escapeHtml(item.studentEssayContent || "")}</div>
-      </div>
+      ${buildSubmissionFilesHTML(item)}
     `;
     wireResultsBlock(container);
     container.querySelector("#eg-mine-back").addEventListener("click", () => {
@@ -1285,27 +1391,24 @@ nếu Rubric không nêu, dùng thang 10.
             <div class="eg-submission-meta">${escapeHtml(item.studentEmail || "")} · Nộp lúc ${formatDate(item.submittedAt)}</div>
           </div>
         </div>
-        ${item.status === "reviewed" ? `<div class="eg-submission-feedback">Đã duyệt bởi ${escapeHtml(item.reviewedByName || "")} lúc ${formatDate(item.reviewedAt)}</div>` : ""}
+        ${item.status === "reviewed" ? `<div class="eg-submission-feedback">Đã duyệt bởi ${escapeHtml(item.reviewedBy || "")} lúc ${formatDate(item.reviewedAt)}</div>` : ""}
       </div>
       ${item.aiResult ? buildResultsBlockHTML(item.aiResult) : `<div class="eg-empty">Không có dữ liệu chấm AI.</div>`}
+      ${buildSubmissionFilesHTML(item)}
       <div class="eg-card">
-        <h3><i class="fa-solid fa-file-lines"></i> Nội dung bài làm</h3>
-        <div class="eg-essay-box">${escapeHtml(item.studentEssayContent || "")}</div>
-      </div>
-      <div class="eg-card">
-        <h3><i class="fa-solid fa-comment-dots"></i> Nhận xét của Admin</h3>
+        <h3><i class="fa-solid fa-comment-dots"></i> Nhận xét của giáo viên</h3>
         <div class="eg-feedback-row">
           <div class="eg-field" style="flex:3;">
             <label>Nội dung nhận xét</label>
-            <textarea id="eg-admin-feedback-text" rows="4" placeholder="Nhận xét cho học viên...">${escapeHtml(item.adminFeedback || "")}</textarea>
+            <textarea id="eg-admin-feedback-text" rows="4" placeholder="Nhận xét cho học viên...">${escapeHtml(item.teacherComment || "")}</textarea>
           </div>
           <div class="eg-field" style="flex:1; min-width:120px;">
-            <label>Điểm Admin (tuỳ chọn)</label>
-            <input type="number" id="eg-admin-score" step="0.1" value="${item.adminScore ?? ""}" placeholder="VD: 8.5" />
+            <label>Điểm giáo viên (tuỳ chọn)</label>
+            <input type="number" id="eg-admin-score" step="0.1" value="${item.teacherScore ?? ""}" placeholder="VD: 8.5" />
           </div>
         </div>
         <div style="margin-top:12px;">
-          <button class="eg-btn eg-btn-success" id="eg-send-feedback-btn" style="width:auto;"><i class="fa-solid fa-paper-plane"></i> Gửi nhận xét tới học viên</button>
+          <button class="eg-btn eg-btn-success" id="eg-send-feedback-btn" style="width:auto;"><i class="fa-solid fa-paper-plane"></i> Gửi nhận xét</button>
         </div>
         <div class="eg-toast" id="eg-admin-feedback-toast"></div>
         <div class="eg-error" id="eg-admin-feedback-error"></div>
@@ -1445,7 +1548,7 @@ nếu Rubric không nêu, dùng thang 10.
     // Trạng thái upload cho tab "Chấm bài mới"
     // ------------------------------------------------------------------
     const uploadedFiles = { assignment: null, rubric: null, answerKey: null, exampleEssays: [], knowledgeBase: [], studentEssay: null };
-    let lastGradeContext = null; // { assignmentName, studentEssayName, studentEssayContent, aiResult }
+    let lastGradeContext = null; // { assignment, rubric, answerKey, exampleEssays, knowledgeBase, studentEssay, aiResult }
 
     // ------------------------------------------------------------------
     // Chọn Nhà cung cấp AI (Anthropic / Gemini) + Model tương ứng, mỗi
@@ -1578,10 +1681,18 @@ nếu Rubric không nêu, dùng thang 10.
         resultsWrap.classList.add("eg-active");
         resultsWrap.scrollIntoView({ behavior: "smooth", block: "start" });
 
+        // Snapshot TOÀN BỘ tài liệu đã upload + kết quả AI tại thời điểm chấm
+        // này — dùng deep-copy (JSON round-trip) để nếu người dùng chấm lại
+        // (ghi đè uploadedFiles) thì bản đã lưu ở đây không bị ảnh hưởng.
+        // Đây chính là dữ liệu sẽ được ghi thành 1 Submission mới khi bấm
+        // "Nộp bài" — không overwrite submission trước đó.
         lastGradeContext = {
-          assignmentName: uploadedFiles.assignment?.name || "",
-          studentEssayName: uploadedFiles.studentEssay?.name || "",
-          studentEssayContent: uploadedFiles.studentEssay?.content || "",
+          assignment: uploadedFiles.assignment ? JSON.parse(JSON.stringify(uploadedFiles.assignment)) : null,
+          rubric: uploadedFiles.rubric ? JSON.parse(JSON.stringify(uploadedFiles.rubric)) : null,
+          answerKey: uploadedFiles.answerKey ? JSON.parse(JSON.stringify(uploadedFiles.answerKey)) : null,
+          exampleEssays: JSON.parse(JSON.stringify(uploadedFiles.exampleEssays || [])),
+          knowledgeBase: JSON.parse(JSON.stringify(uploadedFiles.knowledgeBase || [])),
+          studentEssay: uploadedFiles.studentEssay ? JSON.parse(JSON.stringify(uploadedFiles.studentEssay)) : null,
           aiResult: result,
         };
 
@@ -1590,7 +1701,7 @@ nếu Rubric không nêu, dùng thang 10.
         wrapper.querySelector("#eg-submit-toast").classList.remove("eg-active");
         wrapper.querySelector("#eg-submit-error").classList.remove("eg-active");
         submitAdminBtn.disabled = false;
-        submitAdminBtn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> Gửi bài cho Admin`;
+        submitAdminBtn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> Nộp bài`;
       } catch (err) {
         showError(wrapper, err.message || String(err));
       } finally {
@@ -1607,7 +1718,7 @@ nếu Rubric không nêu, dùng thang 10.
       submitAdminBtn.disabled = true;
       try {
         await submitToAdmin(lastGradeContext);
-        toastEl.textContent = "Đã gửi bài cho Admin. Bạn có thể theo dõi ở tab \"Bài đã nộp của tôi\".";
+        toastEl.textContent = "Đã nộp bài thành công. Bạn có thể theo dõi ở tab \"Lịch sử bài nộp\".";
         toastEl.classList.add("eg-active");
       } catch (err) {
         errorEl.textContent = err.message || String(err);
@@ -1637,7 +1748,7 @@ nếu Rubric không nêu, dùng thang 10.
     });
 
     // ------------------------------------------------------------------
-    // Tab "Bài đã nộp của tôi"
+    // Tab "Lịch sử bài nộp"
     // ------------------------------------------------------------------
     const mineListEl = wrapper.querySelector("#eg-mine-list");
     const mineDetailEl = wrapper.querySelector("#eg-mine-detail");
@@ -1659,17 +1770,20 @@ nếu Rubric không nêu, dùng thang 10.
     }
 
     // ------------------------------------------------------------------
-    // Tab "Duyệt bài học viên" (chỉ Admin)
+    // Tab "Quản lý bài nộp" (chỉ Admin)
     // ------------------------------------------------------------------
     const adminListEl = wrapper.querySelector("#eg-admin-list");
     const adminDetailEl = wrapper.querySelector("#eg-admin-detail");
     const countAdminEl = wrapper.querySelector("#eg-count-admin");
-    const onlyPendingChk = wrapper.querySelector("#eg-admin-onlypending");
+    const adminFilterSel = wrapper.querySelector("#eg-admin-filter");
+    const adminSearchInput = wrapper.querySelector("#eg-admin-search");
+    const adminSortSel = wrapper.querySelector("#eg-admin-sort");
     const navBadgeEl = document.getElementById("eg-nav-badge");
     let adminItemsCache = [];
 
     function refreshAdminList() {
-      renderAdminList(adminListEl, adminItemsCache, onlyPendingChk.checked, (item) =>
+      const options = { filter: adminFilterSel.value, search: adminSearchInput.value, sort: adminSortSel.value };
+      renderAdminList(adminListEl, adminItemsCache, options, (item) =>
         renderAdminDetail(adminDetailEl, item, () => {
           adminDetailEl.style.display = "none";
           document.getElementById("eg-admin-list-card").style.display = "block";
@@ -1694,7 +1808,9 @@ nếu Rubric không nêu, dùng thang 10.
         (err) => { adminListEl.innerHTML = `<div class="eg-empty">Không tải được danh sách (${escapeHtml(err.message || "")}). Có thể cần cấu hình Firestore rules cho Admin.</div>`; }
       );
     }
-    onlyPendingChk.addEventListener("change", refreshAdminList);
+    adminFilterSel.addEventListener("change", refreshAdminList);
+    adminSearchInput.addEventListener("input", refreshAdminList);
+    adminSortSel.addEventListener("change", refreshAdminList);
 
     // ------------------------------------------------------------------
     // Hiện/ẩn tab Admin theo vai trò, và luôn khởi động 2 listener đếm badge
@@ -1709,7 +1825,7 @@ nếu Rubric không nêu, dùng thang 10.
       if (currentAuthUser()) {
         startMineListener();
       } else {
-        mineListEl.innerHTML = `<div class="eg-empty">Đăng nhập để xem và nộp bài cho Admin.</div>`;
+        mineListEl.innerHTML = `<div class="eg-empty">Đăng nhập để nộp bài và xem lịch sử bài nộp của bạn.</div>`;
       }
     });
   }
