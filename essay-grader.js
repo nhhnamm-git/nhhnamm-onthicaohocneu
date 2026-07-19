@@ -1,44 +1,64 @@
 /**
  * essay-grader.js
  * ============================================================================
- * Widget CHẤM BÀI LUẬN BẰNG AI — tự dựng UI, chỉ cần nhúng 1 thẻ <script>.
- *
- * CÁCH DÙNG
- * ----------------------------------------------------------------------------
- * Thêm dòng này vào cuối <body> của index.html (sau các script khác):
+ * MODULE "CHẤM BÀI LUẬN AI" — tích hợp thành 1 TAB MỚI trong sidebar của app.
+ * Chỉ cần thêm 1 dòng duy nhất vào cuối <body>, TRƯỚC thẻ </body>, SAU toàn
+ * bộ script hiện có của trang (để fbDb / fbAuth / AuthManager / UIManager đã
+ * tồn tại khi module này chạy):
  *
  *   <script src="essay-grader.js"></script>
  *
- * Mặc định widget sẽ tự tạo một mục "Chấm bài luận AI" và gắn vào cuối
- * <body>. Nếu muốn đặt widget vào đúng chỗ mong muốn (vd trong khu vực nội
- * dung chính của layout hiện có), chỉ cần đặt sẵn 1 thẻ:
- *
- *   <div id="essay-grader-root"></div>
- *
- * ở vị trí mong muốn trước khi script chạy — widget sẽ mount vào đó thay vì
- * tự thêm vào cuối body.
- *
- * Người dùng cuối (giáo viên) sẽ tự nhập Anthropic API key ngay trên giao
- * diện (ô "Cấu hình API") — không cần sửa code.
- *
- * CẢNH BÁO BẢO MẬT
+ * LUỒNG HOẠT ĐỘNG
  * ----------------------------------------------------------------------------
- * Widget gọi thẳng Anthropic API từ trình duyệt, nghĩa là API key nằm trong
- * bộ nhớ/localStorage của trình duyệt người dùng và bất kỳ ai xem DevTools
- * (Network tab) trên máy đó đều có thể thấy được. Điều này phù hợp cho
- * dùng cá nhân / nội bộ. Nếu triển khai cho nhiều người dùng công khai,
- * nên thay bằng một backend proxy nhỏ để giấu key (đổi `apiEndpoint` trong
- * CONFIG bên dưới, không cần sửa gì khác).
+ * 1. Học viên vào tab "Chấm bài luận AI" → upload đề/rubric/đáp án/bài mẫu/bài
+ *    làm → bấm "Chấm bài ngay" → AI (Claude) chấm và phân tích.
+ * 2. Học viên bấm "Gửi bài cho Admin" → bài làm + kết quả AI được lưu lên
+ *    Firestore (collection "essaySubmissions"), trạng thái "pending".
+ * 3. Admin (tài khoản có role=admin trong collection "allowedUsers", giống hệ
+ *    thống hiện tại của app) vào cùng tab, thấy thêm mục "Duyệt bài học viên"
+ *    — danh sách realtime tất cả bài đã nộp, xem lại bài + nhận xét của AI,
+ *    viết nhận xét riêng, bấm "Gửi nhận xét".
+ * 4. Học viên xem lại ở mục "Bài đã nộp của tôi" — thấy nhận xét của Admin
+ *    xuất hiện realtime (không cần tải lại trang) nhờ Firestore onSnapshot.
+ *
+ * YÊU CẦU BẮT BUỘC VỀ FIRESTORE SECURITY RULES
+ * ----------------------------------------------------------------------------
+ * Module dùng 1 collection mới "essaySubmissions". Cần thêm rule tương ứng
+ * (điều chỉnh theo cách app hiện xác định admin — ở đây minh hoạ bằng cách
+ * đọc collection "allowedUsers" giống các rule khác của app):
+ *
+ *   match /essaySubmissions/{submissionId} {
+ *     function isSignedIn() { return request.auth != null; }
+ *     function isAdmin() {
+ *       return isSignedIn() &&
+ *         get(/databases/$(database)/documents/allowedUsers/$(request.auth.token.email.lower())).data.role == 'admin';
+ *     }
+ *     allow create: if isSignedIn() && request.resource.data.studentUid == request.auth.uid;
+ *     allow read:   if isSignedIn() && (resource.data.studentUid == request.auth.uid || isAdmin());
+ *     allow update: if isSignedIn() && isAdmin();
+ *     allow delete: if false;
+ *   }
+ *
+ * Nếu rule "isAdmin()" ở trên không khớp với cách project đã cấu hình sẵn,
+ * hãy thay bằng đúng hàm/kiểm tra admin mà các collection khác (vd
+ * "sharedQuestionBank", "sharedCustomExams") của app đang dùng.
+ *
+ * CẢNH BÁO BẢO MẬT (API KEY)
+ * ----------------------------------------------------------------------------
+ * Việc chấm bài (bước AI) gọi thẳng Anthropic API từ trình duyệt bằng API key
+ * do người dùng tự nhập — key có thể bị xem qua DevTools trên máy của họ. Phù
+ * hợp cho dùng nội bộ/lớp học nhỏ. Nếu cần an toàn hơn cho quy mô lớn, hãy đổi
+ * CONFIG.apiEndpoint bên dưới sang một backend proxy riêng của bạn.
  * ============================================================================
  */
 (function (global, document) {
   "use strict";
 
-  if (global.__essayGraderMounted) return; // tránh mount 2 lần nếu script bị nhúng nhiều lần
+  if (global.__essayGraderMounted) return;
   global.__essayGraderMounted = true;
 
   // ==========================================================================
-  // 0. CẤU HÌNH MẶC ĐỊNH
+  // 0. CẤU HÌNH
   // ==========================================================================
   const CONFIG = {
     apiEndpoint: "https://api.anthropic.com/v1/messages",
@@ -47,10 +67,16 @@
     storageKeyApiKey: "essayGrader.apiKey",
     storageKeyModel: "essayGrader.model",
     maxScoreDefault: 10,
+    firestoreCollection: "essaySubmissions",
+    maxDocBytes: 900000, // Firestore giới hạn ~1MB/document, chừa biên an toàn
   };
 
+  const VIEW_ID = "essayGrader";
+  const NAV_TITLE = "Chấm bài luận AI";
+  const NAV_SUB = "Upload đề, rubric, đáp án, bài mẫu và bài làm để AI chấm điểm, phân tích chi tiết";
+
   // ==========================================================================
-  // 1. SYSTEM PROMPT
+  // 1. SYSTEM PROMPT CHO AI CHẤM BÀI
   // ==========================================================================
   const SYSTEM_PROMPT = `
 ROLE
@@ -168,7 +194,7 @@ nếu Rubric không nêu, dùng thang 10.
 `.trim();
 
   // ==========================================================================
-  // 2. ĐỌC FILE
+  // 2. ĐỌC FILE (txt/md/csv/json/html trực tiếp; pdf/docx cần thư viện ngoài)
   // ==========================================================================
   const TEXT_EXTENSIONS = ["txt", "md", "markdown", "csv", "json", "html", "htm"];
 
@@ -176,7 +202,6 @@ nếu Rubric không nêu, dùng thang 10.
     const parts = filename.split(".");
     return parts.length > 1 ? parts.pop().toLowerCase() : "";
   }
-
   function readAsText(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -185,7 +210,6 @@ nếu Rubric không nêu, dùng thang 10.
       reader.readAsText(file);
     });
   }
-
   function readAsArrayBuffer(file) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -194,7 +218,6 @@ nếu Rubric không nêu, dùng thang 10.
       reader.readAsArrayBuffer(file);
     });
   }
-
   async function readPdf(file) {
     if (!global.pdfjsLib) {
       throw new Error(
@@ -213,7 +236,6 @@ nếu Rubric không nêu, dùng thang 10.
     }
     return text.trim();
   }
-
   async function readDocx(file) {
     if (!global.mammoth) {
       throw new Error(
@@ -226,7 +248,6 @@ nếu Rubric không nêu, dùng thang 10.
     const result = await global.mammoth.extractRawText({ arrayBuffer: buffer });
     return result.value.trim();
   }
-
   async function extractFileContent(file) {
     const ext = getExtension(file.name);
     if (TEXT_EXTENSIONS.includes(ext)) return readAsText(file);
@@ -234,7 +255,6 @@ nếu Rubric không nêu, dùng thang 10.
     if (ext === "docx") return readDocx(file);
     throw new Error(`Định dạng ".${ext}" (${file.name}) chưa được hỗ trợ đọc trực tiếp.`);
   }
-
   function computeStatistics(text) {
     const trimmed = (text || "").trim();
     const words = trimmed ? trimmed.split(/\s+/).filter(Boolean).length : 0;
@@ -242,32 +262,36 @@ nếu Rubric không nêu, dùng thang 10.
     const paragraphs = trimmed ? trimmed.split(/\n\s*\n/).filter((p) => p.trim()).length : 0;
     return { words, sentences, paragraphs };
   }
-
   function escapeHtml(str) {
     return String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
     }[c]));
   }
+  function formatDate(ts) {
+    try {
+      const d = ts && typeof ts.toDate === "function" ? ts.toDate() : ts instanceof Date ? ts : null;
+      if (!d) return "-";
+      return d.toLocaleString("vi-VN", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+    } catch (e) {
+      return "-";
+    }
+  }
 
   // ==========================================================================
-  // 3. LOGIC GỌI API + PARSE
+  // 3. GỌI AI CHẤM BÀI
   // ==========================================================================
   class EssayGraderEngine {
     constructor({ apiKey, model }) {
       this.apiKey = apiKey;
       this.model = model || CONFIG.defaultModel;
     }
-
     _normalize(input) {
       if (!input) return "";
       if (typeof input === "string") return input;
-      if (Array.isArray(input)) {
-        return input.filter(Boolean).map((i) => this._normalize(i)).join("\n\n---\n\n");
-      }
+      if (Array.isArray(input)) return input.filter(Boolean).map((i) => this._normalize(i)).join("\n\n---\n\n");
       if (input.content) return `[Tên file: ${input.name || "không rõ"}]\n${input.content}`;
       return "";
     }
-
     _buildUserPrompt(inputs) {
       const section = (title, value) => {
         const n = this._normalize(value);
@@ -285,26 +309,20 @@ nếu Rubric không nêu, dùng thang 10.
         `\nHãy thực hiện đầy đủ REQUIRED WORKFLOW và trả về DUY NHẤT JSON theo đúng schema đã quy định. Không thêm bất kỳ văn bản nào ngoài JSON.`,
       ].join("\n");
     }
-
     async grade(inputs, onProgress) {
       const progress = typeof onProgress === "function" ? onProgress : () => {};
       if (!inputs.studentEssay) throw new Error("Thiếu bài làm của sinh viên.");
       if (!inputs.rubric) throw new Error("Thiếu Rubric (tiêu chí chấm).");
-
       progress("Đang đọc Assignment, Rubric, Answer Key, Bài mẫu, Knowledge Base...");
       const userPrompt = this._buildUserPrompt(inputs);
-
       progress("Đang gửi cho AI chấm bài (xây tiêu chí, đối chiếu, chấm điểm, phân tích)...");
       const raw = await this._call(userPrompt);
-
       progress("Đang phân tích kết quả trả về...");
       const result = this._parse(raw);
-
       const studentText = this._normalize(inputs.studentEssay);
       const offline = computeStatistics(studentText);
       result.statistics = {
-        ...offline,
-        ...result.statistics,
+        ...offline, ...result.statistics,
         words: result.statistics?.words || offline.words,
         sentences: result.statistics?.sentences || offline.sentences,
         paragraphs: result.statistics?.paragraphs || offline.paragraphs,
@@ -312,7 +330,6 @@ nếu Rubric không nêu, dùng thang 10.
       progress("Hoàn tất.");
       return result;
     }
-
     async _call(userPrompt) {
       const res = await fetch(CONFIG.apiEndpoint, {
         method: "POST",
@@ -323,9 +340,7 @@ nếu Rubric không nêu, dùng thang 10.
           "anthropic-dangerous-direct-browser-access": "true",
         },
         body: JSON.stringify({
-          model: this.model,
-          max_tokens: CONFIG.maxTokens,
-          system: SYSTEM_PROMPT,
+          model: this.model, max_tokens: CONFIG.maxTokens, system: SYSTEM_PROMPT,
           messages: [{ role: "user", content: userPrompt }],
         }),
       });
@@ -338,22 +353,100 @@ nếu Rubric không nêu, dùng thang 10.
       if (!text) throw new Error("AI không trả về nội dung.");
       return text;
     }
-
     _parse(text) {
       let cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
-      const a = cleaned.indexOf("{");
-      const b = cleaned.lastIndexOf("}");
+      const a = cleaned.indexOf("{"), b = cleaned.lastIndexOf("}");
       if (a !== -1 && b !== -1 && b > a) cleaned = cleaned.slice(a, b + 1);
-      try {
-        return JSON.parse(cleaned);
-      } catch (err) {
-        throw new Error("Không phân tích được JSON từ AI: " + err.message);
-      }
+      try { return JSON.parse(cleaned); }
+      catch (err) { throw new Error("Không phân tích được JSON từ AI: " + err.message); }
     }
   }
 
   // ==========================================================================
-  // 4. CSS CỦA WIDGET (namespace "eg-", dùng biến theme sẵn có, có fallback)
+  // 4. TÍCH HỢP FIRESTORE — NỘP BÀI CHO ADMIN / DUYỆT / GỬI NHẬN XÉT
+  // ==========================================================================
+  function firestoreReady() {
+    return !!(global.fbDb && global.firebase && global.firebase.firestore);
+  }
+
+  function currentAuthUser() {
+    return global.AuthManager && global.AuthManager.currentUser ? global.AuthManager.currentUser : null;
+  }
+
+  function isCurrentUserAdmin() {
+    return !!(global.AuthManager && typeof global.AuthManager.isAdmin === "function" && global.AuthManager.isAdmin());
+  }
+
+  async function submitToAdmin(payload) {
+    if (!firestoreReady()) throw new Error("Chưa kết nối được Firestore.");
+    const user = currentAuthUser();
+    if (!user) throw new Error("Bạn cần đăng nhập để nộp bài cho Admin.");
+
+    const docData = {
+      studentUid: user.uid,
+      studentEmail: user.email || "",
+      studentName: user.displayName || user.email || "Học viên",
+      studentAvatar: user.photoURL || "",
+      assignmentName: payload.assignmentName || "",
+      studentEssayName: payload.studentEssayName || "",
+      studentEssayContent: payload.studentEssayContent || "",
+      aiResult: payload.aiResult || null,
+      status: "pending",
+      adminFeedback: "",
+      adminScore: null,
+      submittedAt: global.firebase.firestore.FieldValue.serverTimestamp(),
+      reviewedAt: null,
+      reviewedByUid: null,
+      reviewedByName: null,
+    };
+
+    const approxBytes = new Blob([JSON.stringify(docData)]).size;
+    if (approxBytes > CONFIG.maxDocBytes) {
+      throw new Error("Bài làm + kết quả AI quá lớn để gửi (vượt giới hạn ~1MB của Firestore). Hãy rút gọn bài làm hoặc số lượng bài mẫu/knowledge base trước khi chấm.");
+    }
+
+    return global.fbDb.collection(CONFIG.firestoreCollection).add(docData);
+  }
+
+  function listenMySubmissions(onChange, onError) {
+    if (!firestoreReady()) return () => {};
+    const user = currentAuthUser();
+    if (!user) return () => {};
+    return global.fbDb.collection(CONFIG.firestoreCollection)
+      .where("studentUid", "==", user.uid)
+      .orderBy("submittedAt", "desc")
+      .onSnapshot(
+        (snap) => onChange(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+        (err) => { console.error("[essay-grader] listenMySubmissions:", err); if (onError) onError(err); }
+      );
+  }
+
+  function listenAllSubmissions(onChange, onError) {
+    if (!firestoreReady()) return () => {};
+    return global.fbDb.collection(CONFIG.firestoreCollection)
+      .orderBy("submittedAt", "desc")
+      .onSnapshot(
+        (snap) => onChange(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
+        (err) => { console.error("[essay-grader] listenAllSubmissions:", err); if (onError) onError(err); }
+      );
+  }
+
+  async function sendFeedback(submissionId, feedbackText, adminScore) {
+    if (!firestoreReady()) throw new Error("Chưa kết nối được Firestore.");
+    const user = currentAuthUser();
+    if (!user) throw new Error("Bạn cần đăng nhập.");
+    return global.fbDb.collection(CONFIG.firestoreCollection).doc(submissionId).update({
+      status: "reviewed",
+      adminFeedback: feedbackText || "",
+      adminScore: (adminScore === "" || adminScore == null || isNaN(adminScore)) ? null : Number(adminScore),
+      reviewedAt: global.firebase.firestore.FieldValue.serverTimestamp(),
+      reviewedByUid: user.uid,
+      reviewedByName: user.displayName || user.email || "Admin",
+    });
+  }
+
+  // ==========================================================================
+  // 5. CSS
   // ==========================================================================
   const STYLE = `
   #essay-grader-widget * { box-sizing: border-box; }
@@ -372,16 +465,9 @@ nếu Rubric không nêu, dùng thang 10.
     --eg-warning: var(--warning, #f59e0b);
     font-family: 'Inter', system-ui, sans-serif;
     color: var(--eg-text);
-    max-width: 1080px;
-    margin: 32px auto;
-    padding: 0 16px;
   }
   #essay-grader-widget .eg-header { margin-bottom: 20px; }
   #essay-grader-widget .eg-header h2 { font-size: 22px; font-weight: 800; margin: 0 0 4px; display:flex; align-items:center; gap:10px;}
-  #essay-grader-widget .eg-header h2 .eg-badge{
-    font-size:11px; font-weight:700; padding:3px 9px; border-radius:99px;
-    background: linear-gradient(135deg, var(--eg-accent), var(--eg-accent-2)); color:#fff; letter-spacing:.3px;
-  }
   #essay-grader-widget .eg-header p { font-size: 13px; color: var(--eg-text-muted); margin: 0; }
   #essay-grader-widget .eg-card {
     background: var(--eg-card-bg); border: 1px solid var(--eg-card-border);
@@ -392,7 +478,7 @@ nếu Rubric không nêu, dùng thang 10.
   #essay-grader-widget .eg-config-row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
   #essay-grader-widget .eg-field { display:flex; flex-direction:column; gap:6px; flex:1; min-width:180px; }
   #essay-grader-widget .eg-field label { font-size:11.5px; font-weight:700; color:var(--eg-text-muted); text-transform:uppercase; letter-spacing:.4px;}
-  #essay-grader-widget input[type=text], #essay-grader-widget input[type=password],
+  #essay-grader-widget input[type=text], #essay-grader-widget input[type=password], #essay-grader-widget input[type=number],
   #essay-grader-widget select, #essay-grader-widget textarea {
     border: 1.5px solid var(--eg-card-border); border-radius: var(--eg-radius-sm);
     padding: 9px 12px; font-size: 13px; font-family: inherit; color: var(--eg-text);
@@ -431,8 +517,14 @@ nếu Rubric không nêu, dùng thang 10.
     background: linear-gradient(135deg, var(--eg-accent), var(--eg-accent-2)); color:#fff;
     box-shadow: 0 8px 20px rgba(20,120,212,.28); width:100%;
   }
-  #essay-grader-widget .eg-btn-primary:disabled { opacity:.55; cursor:not-allowed; }
-  #essay-grader-widget .eg-btn-primary:not(:disabled):hover { transform: translateY(-1px); }
+  #essay-grader-widget .eg-btn-secondary {
+    background: rgba(20,120,212,.1); color: var(--eg-accent); width:auto;
+  }
+  #essay-grader-widget .eg-btn-success {
+    background: linear-gradient(135deg, var(--eg-success), #0ea968); color:#fff; width:auto;
+  }
+  #essay-grader-widget .eg-btn:disabled { opacity:.55; cursor:not-allowed; }
+  #essay-grader-widget .eg-btn-primary:not(:disabled):hover, #essay-grader-widget .eg-btn-success:not(:disabled):hover { transform: translateY(-1px); }
   #essay-grader-widget .eg-progress-wrap { margin-top:14px; display:none; }
   #essay-grader-widget .eg-progress-wrap.eg-active { display:block; }
   #essay-grader-widget .eg-progress-bar { height:6px; border-radius:20px; background: rgba(20,120,212,.12); overflow:hidden; }
@@ -448,15 +540,21 @@ nếu Rubric không nêu, dùng thang 10.
     background: rgba(239,68,68,.09); color: var(--eg-danger); font-size:12.5px; display:none;
   }
   #essay-grader-widget .eg-error.eg-active { display:block; }
-  #essay-grader-widget .eg-results { display:none; }
-  #essay-grader-widget .eg-results.eg-active { display:block; }
+  #essay-grader-widget .eg-toast {
+    margin-top:12px; padding:10px 14px; border-radius: var(--eg-radius-sm);
+    background: rgba(22,199,132,.1); color: var(--eg-success); font-size:12.5px; display:none;
+  }
+  #essay-grader-widget .eg-toast.eg-active { display:block; }
+  #essay-grader-widget .eg-results-wrap { display:none; margin-top:18px; }
+  #essay-grader-widget .eg-results-wrap.eg-active { display:block; }
   #essay-grader-widget .eg-score-row { display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
   #essay-grader-widget .eg-gauge { flex-shrink:0; }
   #essay-grader-widget .eg-score-summary { flex:1; min-width:220px; font-size:13.5px; color: var(--eg-text); line-height:1.6; }
   #essay-grader-widget .eg-tabs { display:flex; gap:4px; flex-wrap:wrap; border-bottom:1.5px solid var(--eg-card-border); margin-bottom:16px; }
   #essay-grader-widget .eg-tab {
     padding:9px 14px; font-size:12.5px; font-weight:700; color: var(--eg-text-muted);
-    border-bottom:2px solid transparent; cursor:pointer; margin-bottom:-1.5px;
+    border-bottom:2px solid transparent; cursor:pointer; margin-bottom:-1.5px; white-space:nowrap;
+    display:flex; align-items:center; gap:6px;
   }
   #essay-grader-widget .eg-tab.eg-active-tab { color: var(--eg-accent); border-color: var(--eg-accent); }
   #essay-grader-widget .eg-tabpanel { display:none; }
@@ -473,9 +571,7 @@ nếu Rubric không nêu, dùng thang 10.
     padding: 12px 14px; margin-bottom:10px;
   }
   #essay-grader-widget .eg-item-top { display:flex; justify-content:space-between; gap:8px; align-items:flex-start; margin-bottom:6px; }
-  #essay-grader-widget .eg-severity {
-    font-size:10px; font-weight:800; padding:2px 8px; border-radius:99px; text-transform:uppercase; flex-shrink:0;
-  }
+  #essay-grader-widget .eg-severity { font-size:10px; font-weight:800; padding:2px 8px; border-radius:99px; text-transform:uppercase; flex-shrink:0; }
   #essay-grader-widget .eg-severity-high { background: rgba(239,68,68,.12); color: var(--eg-danger); }
   #essay-grader-widget .eg-severity-medium { background: rgba(245,158,11,.14); color: var(--eg-warning); }
   #essay-grader-widget .eg-severity-low { background: rgba(22,199,132,.13); color: var(--eg-success); }
@@ -492,108 +588,39 @@ nếu Rubric không nêu, dùng thang 10.
   #essay-grader-widget .eg-summary-box h4 { font-size:12.5px; margin:0 0 8px; font-weight:800; }
   #essay-grader-widget .eg-rewritten { white-space:pre-wrap; font-size:13px; line-height:1.7; color: var(--eg-text); }
   #essay-grader-widget .eg-empty { font-size:12.5px; color: var(--eg-text-muted); text-align:center; padding: 20px 0; }
+  #essay-grader-widget .eg-maintabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:18px; }
+  #essay-grader-widget .eg-maintab {
+    padding:10px 16px; border-radius: var(--eg-radius-sm); font-size:13px; font-weight:700;
+    background: var(--eg-card-bg); border:1px solid var(--eg-card-border); color: var(--eg-text-muted);
+    cursor:pointer; display:flex; align-items:center; gap:8px; transition:.15s;
+  }
+  #essay-grader-widget .eg-maintab.eg-active-maintab { background: linear-gradient(135deg, var(--eg-accent), var(--eg-accent-2)); color:#fff; border-color:transparent; }
+  #essay-grader-widget .eg-maintab .eg-count {
+    font-size:10.5px; font-weight:800; padding:1px 7px; border-radius:99px; background: rgba(0,0,0,.15);
+  }
+  #essay-grader-widget .eg-mainpanel { display:none; }
+  #essay-grader-widget .eg-mainpanel.eg-active-mainpanel { display:block; }
+  #essay-grader-widget .eg-sub-note { font-size:12.5px; color: var(--eg-text-muted); background: rgba(20,120,212,.06); border-radius: var(--eg-radius-sm); padding:10px 14px; margin-bottom:14px; }
+  #essay-grader-widget .eg-submission-card {
+    border:1px solid var(--eg-card-border); border-radius: var(--eg-radius-sm); padding:14px 16px; margin-bottom:12px; cursor:pointer; transition:.15s;
+  }
+  #essay-grader-widget .eg-submission-card:hover { border-color: var(--eg-accent); }
+  #essay-grader-widget .eg-submission-top { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; flex-wrap:wrap; }
+  #essay-grader-widget .eg-submission-title { font-size:13.5px; font-weight:700; }
+  #essay-grader-widget .eg-submission-meta { font-size:11.5px; color: var(--eg-text-muted); margin-top:3px; }
+  #essay-grader-widget .eg-pill { font-size:10.5px; font-weight:800; padding:3px 10px; border-radius:99px; text-transform:uppercase; white-space:nowrap; }
+  #essay-grader-widget .eg-pill-pending { background: rgba(245,158,11,.14); color: var(--eg-warning); }
+  #essay-grader-widget .eg-pill-reviewed { background: rgba(22,199,132,.13); color: var(--eg-success); }
+  #essay-grader-widget .eg-submission-feedback { margin-top:10px; padding:10px 12px; border-radius: var(--eg-radius-sm); background: rgba(22,199,132,.07); font-size:12.5px; }
+  #essay-grader-widget .eg-back-btn { display:inline-flex; align-items:center; gap:6px; font-size:12.5px; font-weight:700; color: var(--eg-accent); cursor:pointer; margin-bottom:14px; }
+  #essay-grader-widget .eg-detail-student { display:flex; align-items:center; gap:10px; margin-bottom:14px; }
+  #essay-grader-widget .eg-detail-student img { width:38px; height:38px; border-radius:50%; }
+  #essay-grader-widget .eg-essay-box { white-space:pre-wrap; font-size:13px; line-height:1.7; max-height:340px; overflow:auto; padding:12px 14px; border:1px solid var(--eg-card-border); border-radius: var(--eg-radius-sm); background: rgba(20,120,212,.03); }
+  #essay-grader-widget .eg-feedback-row { display:flex; gap:12px; flex-wrap:wrap; }
   `;
 
   // ==========================================================================
-  // 5. HTML CỦA WIDGET
-  // ==========================================================================
-  function buildDropZone({ id, icon, title, sub, tag, multiple, required }) {
-    return `
-    <div class="eg-drop ${required ? "eg-required" : ""}" data-drop="${id}">
-      <input type="file" id="eg-file-${id}" ${multiple ? "multiple" : ""} data-target="${id}" />
-      <div class="eg-drop-icon"><i class="fa-solid ${icon}"></i></div>
-      <div class="eg-drop-title">${title}</div>
-      <div class="eg-drop-sub">${sub}</div>
-      <div class="eg-drop-tag">${tag}</div>
-      <div class="eg-filelist" id="eg-filelist-${id}"></div>
-    </div>`;
-  }
-
-  function widgetHTML() {
-    return `
-    <div class="eg-header">
-      <h2><i class="fa-solid fa-graduation-cap" style="color:var(--eg-accent)"></i> Chấm bài luận AI <span class="eg-badge">BETA</span></h2>
-      <p>Upload đề, rubric, đáp án, bài mẫu và bài làm — AI sẽ chấm điểm, phân tích và đề xuất chỉnh sửa theo đúng rubric.</p>
-    </div>
-
-    <div class="eg-card">
-      <h3><i class="fa-solid fa-key"></i> Cấu hình API</h3>
-      <div class="eg-config-row">
-        <div class="eg-field">
-          <label>Anthropic API Key</label>
-          <input type="password" id="eg-apikey" placeholder="sk-ant-..." />
-        </div>
-        <div class="eg-field" style="max-width:220px;">
-          <label>Model</label>
-          <select id="eg-model">
-            <option value="claude-sonnet-5">claude-sonnet-5</option>
-            <option value="claude-opus-4-8">claude-opus-4-8</option>
-            <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
-          </select>
-        </div>
-        <div class="eg-field" style="max-width:170px;">
-          <label>Mức biên tập</label>
-          <select id="eg-editlevel">
-            <option value="Light">Light</option>
-            <option value="Medium" selected>Medium</option>
-            <option value="Advanced">Advanced</option>
-          </select>
-        </div>
-      </div>
-      <div class="eg-hint">
-        <label style="font-weight:600; cursor:pointer;">
-          <input type="checkbox" id="eg-remember" style="width:auto; margin-right:5px;" checked/>
-          Ghi nhớ API key trên trình duyệt này (localStorage)
-        </label>
-        — key chỉ được gửi thẳng tới api.anthropic.com, không qua máy chủ trung gian nào khác.
-      </div>
-    </div>
-
-    <div class="eg-card">
-      <h3><i class="fa-solid fa-file-arrow-up"></i> Tài liệu chấm bài</h3>
-      <div class="eg-grid">
-        ${buildDropZone({ id: "assignment", icon: "fa-file-lines", title: "Đề bài", sub: "Assignment", tag: ".txt .md .html .pdf .docx" })}
-        ${buildDropZone({ id: "rubric", icon: "fa-list-check", title: "Rubric", sub: "Tiêu chí chấm điểm", tag: "bắt buộc", required: true })}
-        ${buildDropZone({ id: "answerKey", icon: "fa-key", title: "Đáp án", sub: "Answer Key", tag: "tuỳ chọn" })}
-        ${buildDropZone({ id: "exampleEssays", icon: "fa-copy", title: "Bài mẫu", sub: "Example Essays (điểm 10/8/6/4/2)", tag: "có thể chọn nhiều file", multiple: true })}
-        ${buildDropZone({ id: "knowledgeBase", icon: "fa-book", title: "Knowledge Base", sub: "Tài liệu nền tham khảo", tag: "có thể chọn nhiều file", multiple: true })}
-        ${buildDropZone({ id: "studentEssay", icon: "fa-pen-nib", title: "Bài làm", sub: "Bài luận cần chấm", tag: "bắt buộc", required: true })}
-      </div>
-      <div class="eg-field" style="margin-top:14px;">
-        <label>Hướng dẫn giáo viên (tuỳ chọn, gõ trực tiếp)</label>
-        <textarea id="eg-teacher-instructions" rows="2" placeholder="VD: chú trọng phần lập luận, bỏ qua lỗi chính tả nhẹ..."></textarea>
-      </div>
-    </div>
-
-    <div class="eg-card">
-      <button class="eg-btn eg-btn-primary" id="eg-grade-btn">
-        <i class="fa-solid fa-wand-magic-sparkles"></i> Chấm bài ngay
-      </button>
-      <div class="eg-progress-wrap" id="eg-progress-wrap">
-        <div class="eg-progress-bar"><div class="eg-progress-fill"></div></div>
-        <div class="eg-progress-label" id="eg-progress-label">Đang xử lý...</div>
-      </div>
-      <div class="eg-error" id="eg-error"></div>
-    </div>
-
-    <div class="eg-results" id="eg-results">
-      <div class="eg-card">
-        <div class="eg-score-row">
-          <div class="eg-gauge" id="eg-gauge"></div>
-          <div class="eg-score-summary" id="eg-summary-text"></div>
-        </div>
-      </div>
-
-      <div class="eg-card">
-        <div class="eg-tabs" id="eg-tabs"></div>
-        <div id="eg-tabpanels"></div>
-      </div>
-    </div>
-    `;
-  }
-
-  // ==========================================================================
-  // 6. VẼ GAUGE (SVG, không phụ thuộc thư viện ngoài)
+  // 6. GAUGE SVG
   // ==========================================================================
   function renderGauge(score, maxScore) {
     const pct = Math.max(0, Math.min(1, maxScore ? score / maxScore : 0));
@@ -612,7 +639,7 @@ nếu Rubric không nêu, dùng thang 10.
   }
 
   // ==========================================================================
-  // 7. RENDER KẾT QUẢ
+  // 7. RENDER HELPERS CHO TỪNG PHẦN KẾT QUẢ
   // ==========================================================================
   function severityClass(sev) {
     const s = (sev || "").toLowerCase();
@@ -620,7 +647,6 @@ nếu Rubric không nêu, dùng thang 10.
     if (s.includes("trung") || s.includes("medium")) return "eg-severity-medium";
     return "eg-severity-low";
   }
-
   function renderCriteria(criteria) {
     if (!criteria || !criteria.length) return `<div class="eg-empty">Không có dữ liệu tiêu chí.</div>`;
     return criteria.map((c) => {
@@ -635,7 +661,6 @@ nếu Rubric không nêu, dùng thang 10.
       </div>`;
     }).join("");
   }
-
   function renderSentences(items) {
     if (!items || !items.length) return `<div class="eg-empty">Không có dữ liệu.</div>`;
     return items.map((s) => `
@@ -650,7 +675,6 @@ nếu Rubric không nêu, dùng thang 10.
         ${s.rubricReference ? `<div class="eg-item-reason"><strong>Rubric:</strong> ${escapeHtml(s.rubricReference)}</div>` : ""}
       </div>`).join("");
   }
-
   function renderParagraphs(items) {
     if (!items || !items.length) return `<div class="eg-empty">Không có dữ liệu.</div>`;
     return items.map((p) => `
@@ -664,7 +688,6 @@ nếu Rubric không nêu, dùng thang 10.
         ${p.rewriteReason ? `<div class="eg-item-reason">${escapeHtml(p.rewriteReason)}</div>` : ""}
       </div>`).join("");
   }
-
   function renderIssueList(items, fields) {
     if (!items || !items.length) return `<div class="eg-empty">Không phát hiện lỗi.</div>`;
     return items.map((it) => `
@@ -674,7 +697,6 @@ nếu Rubric không nêu, dùng thang 10.
         ${it[fields.suggestion] ? `<div class="eg-item-arrow">→ gợi ý</div><div class="eg-item-rewrite">${escapeHtml(it[fields.suggestion])}</div>` : ""}
       </div>`).join("");
   }
-
   function renderStatistics(stats) {
     if (!stats) return "";
     const boxes = [
@@ -686,7 +708,6 @@ nếu Rubric không nêu, dùng thang 10.
       <div class="eg-stat-box"><div class="eg-stat-num">${stats[k] ?? "-"}</div><div class="eg-stat-label">${label}</div></div>
     `).join("")}</div>${stats.academicLevel ? `<div class="eg-hint" style="margin-top:10px;">Mức học thuật: <strong>${escapeHtml(stats.academicLevel)}</strong></div>` : ""}`;
   }
-
   function renderFinalSummary(fs) {
     if (!fs) return `<div class="eg-empty">Không có dữ liệu.</div>`;
     const box = (title, arr) => `
@@ -713,15 +734,11 @@ nếu Rubric không nêu, dùng thang 10.
     { id: "summary", label: "Tổng kết" },
   ];
 
-  function renderResults(root, data) {
+  // Sinh HTML cho 1 khối "kết quả chấm bài" độc lập (không phụ thuộc ID cố
+  // định) để có thể dùng lại ở nhiều nơi: tab Chấm bài mới, chi tiết bài nộp
+  // của học viên, chi tiết duyệt bài của Admin — cùng lúc trên 1 trang.
+  function buildResultsBlockHTML(data) {
     const maxScore = data.maxScore || CONFIG.maxScoreDefault;
-    root.querySelector("#eg-gauge").innerHTML = renderGauge(data.totalScore ?? 0, maxScore);
-    root.querySelector("#eg-summary-text").innerHTML = `<p>${escapeHtml(data.summary || "")}</p>`;
-
-    const tabsEl = root.querySelector("#eg-tabs");
-    const panelsEl = root.querySelector("#eg-tabpanels");
-    tabsEl.innerHTML = TABS.map((t, i) => `<div class="eg-tab ${i === 0 ? "eg-active-tab" : ""}" data-tab="${t.id}">${t.label}</div>`).join("");
-
     const panelContent = {
       overview: renderCriteria(data.criteria),
       sentence: renderSentences(data.sentenceAnalysis),
@@ -736,26 +753,298 @@ nếu Rubric không nêu, dùng thang 10.
       stats: renderStatistics(data.statistics),
       summary: renderFinalSummary(data.finalSummary),
     };
+    return `
+      <div class="eg-card">
+        <div class="eg-score-row">
+          <div class="eg-gauge">${renderGauge(data.totalScore ?? 0, maxScore)}</div>
+          <div class="eg-score-summary"><p>${escapeHtml(data.summary || "")}</p></div>
+        </div>
+      </div>
+      <div class="eg-card">
+        <div class="eg-tabs" data-resulttabs>${TABS.map((t, i) => `<div class="eg-tab ${i === 0 ? "eg-active-tab" : ""}" data-tab="${t.id}">${t.label}</div>`).join("")}</div>
+        <div data-resultpanels>${TABS.map((t, i) => `<div class="eg-tabpanel ${i === 0 ? "eg-active-panel" : ""}" data-panel="${t.id}">${panelContent[t.id]}</div>`).join("")}</div>
+      </div>`;
+  }
 
-    panelsEl.innerHTML = TABS.map((t, i) =>
-      `<div class="eg-tabpanel ${i === 0 ? "eg-active-panel" : ""}" data-panel="${t.id}">${panelContent[t.id]}</div>`
-    ).join("");
-
-    tabsEl.querySelectorAll(".eg-tab").forEach((tabEl) => {
-      tabEl.addEventListener("click", () => {
-        tabsEl.querySelectorAll(".eg-tab").forEach((e) => e.classList.remove("eg-active-tab"));
-        panelsEl.querySelectorAll(".eg-tabpanel").forEach((e) => e.classList.remove("eg-active-panel"));
-        tabEl.classList.add("eg-active-tab");
-        panelsEl.querySelector(`[data-panel="${tabEl.dataset.tab}"]`).classList.add("eg-active-panel");
-      });
+  // Gắn sự kiện chuyển tab cho 1 khối kết quả vừa chèn vào DOM (dùng event
+  // delegation trong phạm vi container, không phụ thuộc ID toàn cục).
+  function wireResultsBlock(container) {
+    const tabsEl = container.querySelector("[data-resulttabs]");
+    const panelsEl = container.querySelector("[data-resultpanels]");
+    if (!tabsEl || !panelsEl) return;
+    tabsEl.addEventListener("click", (e) => {
+      const tabEl = e.target.closest(".eg-tab");
+      if (!tabEl) return;
+      tabsEl.querySelectorAll(".eg-tab").forEach((el) => el.classList.remove("eg-active-tab"));
+      panelsEl.querySelectorAll(".eg-tabpanel").forEach((el) => el.classList.remove("eg-active-panel"));
+      tabEl.classList.add("eg-active-tab");
+      panelsEl.querySelector(`[data-panel="${tabEl.dataset.tab}"]`).classList.add("eg-active-panel");
     });
-
-    root.querySelector("#eg-results").classList.add("eg-active");
-    root.querySelector("#eg-results").scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   // ==========================================================================
-  // 8. KHỞI TẠO WIDGET
+  // 8. HTML CỦA WIDGET
+  // ==========================================================================
+  function buildDropZone({ id, icon, title, sub, tag, multiple, required }) {
+    return `
+    <div class="eg-drop ${required ? "eg-required" : ""}" data-drop="${id}">
+      <input type="file" id="eg-file-${id}" ${multiple ? "multiple" : ""} data-target="${id}" />
+      <div class="eg-drop-icon"><i class="fa-solid ${icon}"></i></div>
+      <div class="eg-drop-title">${title}</div>
+      <div class="eg-drop-sub">${sub}</div>
+      <div class="eg-drop-tag">${tag}</div>
+      <div class="eg-filelist" id="eg-filelist-${id}"></div>
+    </div>`;
+  }
+
+  function widgetHTML() {
+    return `
+    <div class="eg-header">
+      <h2><i class="fa-solid fa-graduation-cap" style="color:var(--eg-accent)"></i> ${NAV_TITLE}</h2>
+      <p>${NAV_SUB}</p>
+    </div>
+
+    <div class="eg-maintabs" id="eg-maintabs">
+      <div class="eg-maintab eg-active-maintab" data-maintab="grade"><i class="fa-solid fa-wand-magic-sparkles"></i> Chấm bài mới</div>
+      <div class="eg-maintab" data-maintab="mine"><i class="fa-solid fa-inbox"></i> Bài đã nộp của tôi <span class="eg-count" id="eg-count-mine">0</span></div>
+      <div class="eg-maintab" data-maintab="admin" id="eg-maintab-admin" style="display:none;"><i class="fa-solid fa-user-shield"></i> Duyệt bài học viên <span class="eg-count" id="eg-count-admin">0</span></div>
+    </div>
+
+    <!-- ================= TAB: CHẤM BÀI MỚI ================= -->
+    <div class="eg-mainpanel eg-active-mainpanel" data-mainpanel="grade">
+      <div class="eg-card">
+        <h3><i class="fa-solid fa-key"></i> Cấu hình API</h3>
+        <div class="eg-config-row">
+          <div class="eg-field">
+            <label>Anthropic API Key</label>
+            <input type="password" id="eg-apikey" placeholder="sk-ant-..." />
+          </div>
+          <div class="eg-field" style="max-width:220px;">
+            <label>Model</label>
+            <select id="eg-model">
+              <option value="claude-sonnet-5">claude-sonnet-5</option>
+              <option value="claude-opus-4-8">claude-opus-4-8</option>
+              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+            </select>
+          </div>
+          <div class="eg-field" style="max-width:170px;">
+            <label>Mức biên tập</label>
+            <select id="eg-editlevel">
+              <option value="Light">Light</option>
+              <option value="Medium" selected>Medium</option>
+              <option value="Advanced">Advanced</option>
+            </select>
+          </div>
+        </div>
+        <div class="eg-hint">
+          <label style="font-weight:600; cursor:pointer;">
+            <input type="checkbox" id="eg-remember" style="width:auto; margin-right:5px;" checked/>
+            Ghi nhớ API key trên trình duyệt này (localStorage)
+          </label>
+          — key chỉ được gửi thẳng tới api.anthropic.com.
+        </div>
+      </div>
+
+      <div class="eg-card">
+        <h3><i class="fa-solid fa-file-arrow-up"></i> Tài liệu chấm bài</h3>
+        <div class="eg-grid">
+          ${buildDropZone({ id: "assignment", icon: "fa-file-lines", title: "Đề bài", sub: "Assignment", tag: ".txt .md .html .pdf .docx" })}
+          ${buildDropZone({ id: "rubric", icon: "fa-list-check", title: "Rubric", sub: "Tiêu chí chấm điểm", tag: "bắt buộc", required: true })}
+          ${buildDropZone({ id: "answerKey", icon: "fa-key", title: "Đáp án", sub: "Answer Key", tag: "tuỳ chọn" })}
+          ${buildDropZone({ id: "exampleEssays", icon: "fa-copy", title: "Bài mẫu", sub: "Example Essays (điểm 10/8/6/4/2)", tag: "có thể chọn nhiều file", multiple: true })}
+          ${buildDropZone({ id: "knowledgeBase", icon: "fa-book", title: "Knowledge Base", sub: "Tài liệu nền tham khảo", tag: "có thể chọn nhiều file", multiple: true })}
+          ${buildDropZone({ id: "studentEssay", icon: "fa-pen-nib", title: "Bài làm", sub: "Bài luận cần chấm", tag: "bắt buộc", required: true })}
+        </div>
+        <div class="eg-field" style="margin-top:14px;">
+          <label>Hướng dẫn giáo viên (tuỳ chọn, gõ trực tiếp)</label>
+          <textarea id="eg-teacher-instructions" rows="2" placeholder="VD: chú trọng phần lập luận, bỏ qua lỗi chính tả nhẹ..."></textarea>
+        </div>
+      </div>
+
+      <div class="eg-card">
+        <button class="eg-btn eg-btn-primary" id="eg-grade-btn"><i class="fa-solid fa-wand-magic-sparkles"></i> Chấm bài ngay</button>
+        <div class="eg-progress-wrap" id="eg-progress-wrap">
+          <div class="eg-progress-bar"><div class="eg-progress-fill"></div></div>
+          <div class="eg-progress-label" id="eg-progress-label">Đang xử lý...</div>
+        </div>
+        <div class="eg-error" id="eg-error"></div>
+      </div>
+
+      <div class="eg-results-wrap" id="eg-results-wrap">
+        <div class="eg-card" id="eg-submit-admin-card">
+          <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+            <div class="eg-hint" style="margin:0;" id="eg-submit-admin-hint">Gửi bài làm này (kèm nhận xét của AI) cho Admin xem và cho ý kiến.</div>
+            <button class="eg-btn eg-btn-success" id="eg-submit-admin-btn"><i class="fa-solid fa-paper-plane"></i> Gửi bài cho Admin</button>
+          </div>
+          <div class="eg-toast" id="eg-submit-toast"></div>
+          <div class="eg-error" id="eg-submit-error"></div>
+        </div>
+        <div id="eg-results-container"></div>
+      </div>
+    </div>
+
+    <!-- ================= TAB: BÀI ĐÃ NỘP CỦA TÔI ================= -->
+    <div class="eg-mainpanel" data-mainpanel="mine">
+      <div class="eg-card" id="eg-mine-list-card">
+        <h3><i class="fa-solid fa-inbox"></i> Bài đã nộp của tôi</h3>
+        <div id="eg-mine-list"><div class="eg-empty">Đang tải...</div></div>
+      </div>
+      <div id="eg-mine-detail" style="display:none;"></div>
+    </div>
+
+    <!-- ================= TAB: DUYỆT BÀI HỌC VIÊN (ADMIN) ================= -->
+    <div class="eg-mainpanel" data-mainpanel="admin">
+      <div class="eg-card" id="eg-admin-list-card">
+        <h3><i class="fa-solid fa-user-shield"></i> Bài học viên đã nộp</h3>
+        <label style="font-size:12px; font-weight:600; cursor:pointer; display:inline-flex; gap:6px; align-items:center; margin-bottom:12px;">
+          <input type="checkbox" id="eg-admin-onlypending" style="width:auto;" checked/> Chỉ hiện bài chờ duyệt
+        </label>
+        <div id="eg-admin-list"><div class="eg-empty">Đang tải...</div></div>
+      </div>
+      <div id="eg-admin-detail" style="display:none;"></div>
+    </div>
+    `;
+  }
+
+  // ==========================================================================
+  // 9. RENDER DANH SÁCH BÀI NỘP
+  // ==========================================================================
+  function renderMineList(container, items, onOpen) {
+    if (!items.length) { container.innerHTML = `<div class="eg-empty">Bạn chưa nộp bài nào. Hãy chấm bài ở tab "Chấm bài mới" rồi bấm "Gửi bài cho Admin".</div>`; return; }
+    container.innerHTML = items.map((it) => `
+      <div class="eg-submission-card" data-id="${it.id}">
+        <div class="eg-submission-top">
+          <div>
+            <div class="eg-submission-title">${escapeHtml(it.studentEssayName || "Bài làm")} ${it.assignmentName ? `— ${escapeHtml(it.assignmentName)}` : ""}</div>
+            <div class="eg-submission-meta">Nộp lúc ${formatDate(it.submittedAt)} · Điểm AI: ${it.aiResult?.totalScore ?? "-"}/${it.aiResult?.maxScore ?? CONFIG.maxScoreDefault}</div>
+          </div>
+          <span class="eg-pill ${it.status === "reviewed" ? "eg-pill-reviewed" : "eg-pill-pending"}">${it.status === "reviewed" ? "Đã có nhận xét" : "Đang chờ Admin"}</span>
+        </div>
+        ${it.status === "reviewed" ? `
+          <div class="eg-submission-feedback">
+            <strong>Nhận xét của ${escapeHtml(it.reviewedByName || "Admin")}${it.adminScore != null ? ` — Điểm: ${it.adminScore}` : ""}:</strong><br/>
+            ${escapeHtml(it.adminFeedback || "(không có nội dung)")}
+          </div>` : ""}
+      </div>`).join("");
+    container.querySelectorAll(".eg-submission-card").forEach((card) => {
+      card.addEventListener("click", () => onOpen(items.find((i) => i.id === card.dataset.id)));
+    });
+  }
+
+  function renderAdminList(container, items, onlyPending, onOpen) {
+    const filtered = onlyPending ? items.filter((i) => i.status !== "reviewed") : items;
+    if (!filtered.length) { container.innerHTML = `<div class="eg-empty">Không có bài nào.</div>`; return; }
+    container.innerHTML = filtered.map((it) => `
+      <div class="eg-submission-card" data-id="${it.id}">
+        <div class="eg-submission-top">
+          <div>
+            <div class="eg-submission-title">${escapeHtml(it.studentName || it.studentEmail)}</div>
+            <div class="eg-submission-meta">${escapeHtml(it.studentEssayName || "Bài làm")}${it.assignmentName ? ` — ${escapeHtml(it.assignmentName)}` : ""} · Nộp lúc ${formatDate(it.submittedAt)} · Điểm AI: ${it.aiResult?.totalScore ?? "-"}/${it.aiResult?.maxScore ?? CONFIG.maxScoreDefault}</div>
+          </div>
+          <span class="eg-pill ${it.status === "reviewed" ? "eg-pill-reviewed" : "eg-pill-pending"}">${it.status === "reviewed" ? "Đã duyệt" : "Chờ duyệt"}</span>
+        </div>
+      </div>`).join("");
+    container.querySelectorAll(".eg-submission-card").forEach((card) => {
+      card.addEventListener("click", () => onOpen(items.find((i) => i.id === card.dataset.id)));
+    });
+  }
+
+  function renderStudentDetail(container, item) {
+    container.innerHTML = `
+      <div class="eg-back-btn" id="eg-mine-back"><i class="fa-solid fa-arrow-left"></i> Quay lại danh sách</div>
+      <div class="eg-card">
+        <div class="eg-submission-title" style="font-size:16px; margin-bottom:6px;">${escapeHtml(item.studentEssayName || "Bài làm")}</div>
+        <div class="eg-submission-meta">Nộp lúc ${formatDate(item.submittedAt)}</div>
+        ${item.status === "reviewed" ? `
+          <div class="eg-submission-feedback" style="margin-top:12px;">
+            <strong>Nhận xét của ${escapeHtml(item.reviewedByName || "Admin")}${item.adminScore != null ? ` — Điểm: ${item.adminScore}` : ""} (${formatDate(item.reviewedAt)}):</strong><br/>
+            ${escapeHtml(item.adminFeedback || "(không có nội dung)")}
+          </div>` : `<div class="eg-sub-note" style="margin-top:12px;">Bài đang chờ Admin xem và nhận xét.</div>`}
+      </div>
+      ${item.aiResult ? buildResultsBlockHTML(item.aiResult) : `<div class="eg-empty">Không có dữ liệu chấm AI.</div>`}
+      <div class="eg-card">
+        <h3><i class="fa-solid fa-file-lines"></i> Nội dung bài làm đã nộp</h3>
+        <div class="eg-essay-box">${escapeHtml(item.studentEssayContent || "")}</div>
+      </div>
+    `;
+    wireResultsBlock(container);
+    container.querySelector("#eg-mine-back").addEventListener("click", () => {
+      container.style.display = "none";
+      document.getElementById("eg-mine-list-card").style.display = "block";
+    });
+    document.getElementById("eg-mine-list-card").style.display = "none";
+    container.style.display = "block";
+  }
+
+  function renderAdminDetail(container, item, onSent) {
+    container.innerHTML = `
+      <div class="eg-back-btn" id="eg-admin-back"><i class="fa-solid fa-arrow-left"></i> Quay lại danh sách</div>
+      <div class="eg-card">
+        <div class="eg-detail-student">
+          ${item.studentAvatar ? `<img src="${escapeHtml(item.studentAvatar)}" alt="">` : ""}
+          <div>
+            <div class="eg-submission-title">${escapeHtml(item.studentName || item.studentEmail)}</div>
+            <div class="eg-submission-meta">${escapeHtml(item.studentEmail || "")} · Nộp lúc ${formatDate(item.submittedAt)}</div>
+          </div>
+        </div>
+        ${item.status === "reviewed" ? `<div class="eg-submission-feedback">Đã duyệt bởi ${escapeHtml(item.reviewedByName || "")} lúc ${formatDate(item.reviewedAt)}</div>` : ""}
+      </div>
+      ${item.aiResult ? buildResultsBlockHTML(item.aiResult) : `<div class="eg-empty">Không có dữ liệu chấm AI.</div>`}
+      <div class="eg-card">
+        <h3><i class="fa-solid fa-file-lines"></i> Nội dung bài làm</h3>
+        <div class="eg-essay-box">${escapeHtml(item.studentEssayContent || "")}</div>
+      </div>
+      <div class="eg-card">
+        <h3><i class="fa-solid fa-comment-dots"></i> Nhận xét của Admin</h3>
+        <div class="eg-feedback-row">
+          <div class="eg-field" style="flex:3;">
+            <label>Nội dung nhận xét</label>
+            <textarea id="eg-admin-feedback-text" rows="4" placeholder="Nhận xét cho học viên...">${escapeHtml(item.adminFeedback || "")}</textarea>
+          </div>
+          <div class="eg-field" style="flex:1; min-width:120px;">
+            <label>Điểm Admin (tuỳ chọn)</label>
+            <input type="number" id="eg-admin-score" step="0.1" value="${item.adminScore ?? ""}" placeholder="VD: 8.5" />
+          </div>
+        </div>
+        <div style="margin-top:12px;">
+          <button class="eg-btn eg-btn-success" id="eg-send-feedback-btn" style="width:auto;"><i class="fa-solid fa-paper-plane"></i> Gửi nhận xét tới học viên</button>
+        </div>
+        <div class="eg-toast" id="eg-admin-feedback-toast"></div>
+        <div class="eg-error" id="eg-admin-feedback-error"></div>
+      </div>
+    `;
+    wireResultsBlock(container);
+    container.querySelector("#eg-admin-back").addEventListener("click", () => {
+      container.style.display = "none";
+      document.getElementById("eg-admin-list-card").style.display = "block";
+    });
+    container.querySelector("#eg-send-feedback-btn").addEventListener("click", async () => {
+      const btn = container.querySelector("#eg-send-feedback-btn");
+      const toastEl = container.querySelector("#eg-admin-feedback-toast");
+      const errorEl = container.querySelector("#eg-admin-feedback-error");
+      toastEl.classList.remove("eg-active"); errorEl.classList.remove("eg-active");
+      const text = container.querySelector("#eg-admin-feedback-text").value.trim();
+      const score = container.querySelector("#eg-admin-score").value;
+      if (!text) { errorEl.textContent = "Vui lòng nhập nội dung nhận xét."; errorEl.classList.add("eg-active"); return; }
+      btn.disabled = true;
+      try {
+        await sendFeedback(item.id, text, score);
+        toastEl.textContent = "Đã gửi nhận xét tới học viên.";
+        toastEl.classList.add("eg-active");
+        if (onSent) onSent();
+      } catch (err) {
+        errorEl.textContent = err.message || String(err);
+        errorEl.classList.add("eg-active");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+    document.getElementById("eg-admin-list-card").style.display = "none";
+    container.style.display = "block";
+  }
+
+  // ==========================================================================
+  // 10. MOUNT — GẮN VÀO SIDEBAR + VIEW CỦA APP
   // ==========================================================================
   function injectStyle() {
     if (document.getElementById("essay-grader-styles")) return;
@@ -766,6 +1055,49 @@ nếu Rubric không nêu, dùng thang 10.
   }
 
   function getMountPoint() {
+    const sidebarNav = document.querySelector(".sidebar-nav");
+    const mainContent = document.querySelector("main.content");
+
+    if (sidebarNav && mainContent) {
+      if (!document.querySelector(`.nav-item[data-view="${VIEW_ID}"]`)) {
+        sidebarNav.insertAdjacentHTML(
+          "beforeend",
+          `<div class="nav-section-label">AI</div>
+           <button class="nav-item" data-view="${VIEW_ID}" id="eg-nav-item">
+             <i class="fa-solid fa-graduation-cap"></i> ${NAV_TITLE}
+             <span class="badge" id="eg-nav-badge" style="display:none;">0</span>
+           </button>`
+        );
+      }
+      const navBtn = document.getElementById("eg-nav-item");
+
+      let view = document.getElementById("view-" + VIEW_ID);
+      if (!view) {
+        mainContent.insertAdjacentHTML("beforeend", `<section class="view" id="view-${VIEW_ID}"></section>`);
+        view = document.getElementById("view-" + VIEW_ID);
+      }
+
+      if (global.UIManager && global.UIManager.titles) {
+        global.UIManager.titles[VIEW_ID] = [NAV_TITLE, NAV_SUB];
+      }
+
+      navBtn.addEventListener("click", () => {
+        if (global.UIManager && typeof global.UIManager.navigate === "function") {
+          global.UIManager.navigate(VIEW_ID);
+        } else {
+          document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+          view.classList.add("active");
+          document.querySelectorAll(".nav-item[data-view]").forEach((b) => b.classList.toggle("active", b === navBtn));
+          const titleEl = document.getElementById("pageTitle");
+          const subEl = document.getElementById("pageSub");
+          if (titleEl) titleEl.textContent = NAV_TITLE;
+          if (subEl) subEl.textContent = NAV_SUB;
+        }
+      });
+
+      return view;
+    }
+
     let el = document.getElementById("essay-grader-root");
     if (!el) {
       el = document.createElement("div");
@@ -775,88 +1107,96 @@ nếu Rubric không nêu, dùng thang 10.
     return el;
   }
 
+  function showError(scopeEl, msg) {
+    const el = scopeEl.querySelector("#eg-error");
+    if (!el) return;
+    el.textContent = msg;
+    el.classList.add("eg-active");
+  }
+  function clearError(scopeEl) {
+    const el = scopeEl.querySelector("#eg-error");
+    if (!el) return;
+    el.textContent = "";
+    el.classList.remove("eg-active");
+  }
+
+  function waitForAuth(cb, tries) {
+    tries = tries || 0;
+    if (global.AuthManager && global.AuthManager.currentUser) return cb();
+    if (tries > 60) return cb(); // ~15s, vẫn gọi lại để UI không treo mãi ở trạng thái "đang tải"
+    setTimeout(() => waitForAuth(cb, tries + 1), 250);
+  }
+
   function mount() {
     injectStyle();
     const mountPoint = getMountPoint();
+    if (document.getElementById("essay-grader-widget")) return;
     const wrapper = document.createElement("div");
     wrapper.id = "essay-grader-widget";
     wrapper.innerHTML = widgetHTML();
     mountPoint.appendChild(wrapper);
 
-    const uploadedFiles = {
-      assignment: null, rubric: null, answerKey: null,
-      exampleEssays: [], knowledgeBase: [], studentEssay: null,
-    };
+    // ------------------------------------------------------------------
+    // Trạng thái upload cho tab "Chấm bài mới"
+    // ------------------------------------------------------------------
+    const uploadedFiles = { assignment: null, rubric: null, answerKey: null, exampleEssays: [], knowledgeBase: [], studentEssay: null };
+    let lastGradeContext = null; // { assignmentName, studentEssayName, studentEssayContent, aiResult }
 
-    // Khôi phục cấu hình đã lưu
     const savedKey = global.localStorage?.getItem(CONFIG.storageKeyApiKey);
     const savedModel = global.localStorage?.getItem(CONFIG.storageKeyModel);
     if (savedKey) wrapper.querySelector("#eg-apikey").value = savedKey;
     if (savedModel) wrapper.querySelector("#eg-model").value = savedModel;
 
-    // Gắn sự kiện cho từng ô upload
     wrapper.querySelectorAll('input[type="file"]').forEach((input) => {
       const targetId = input.dataset.target;
       const listEl = wrapper.querySelector(`#eg-filelist-${targetId}`);
       const dropEl = wrapper.querySelector(`[data-drop="${targetId}"]`);
-
       const renderFileList = () => {
         const val = uploadedFiles[targetId];
         const entries = Array.isArray(val) ? val : val ? [val] : [];
         listEl.innerHTML = entries.map((f, idx) => `
-          <div class="eg-file-chip">
-            <span><i class="fa-solid fa-file"></i> ${escapeHtml(f.name)}</span>
-            <button type="button" data-remove="${targetId}" data-idx="${idx}">✕</button>
-          </div>`).join("");
+          <div class="eg-file-chip"><span><i class="fa-solid fa-file"></i> ${escapeHtml(f.name)}</span>
+          <button type="button" data-remove="${targetId}" data-idx="${idx}">✕</button></div>`).join("");
       };
-
       const handleFiles = async (fileArr) => {
         for (const file of fileArr) {
           try {
             const content = await extractFileContent(file);
             const entry = { name: file.name, content };
-            if (Array.isArray(uploadedFiles[targetId])) {
-              uploadedFiles[targetId].push(entry);
-            } else {
-              uploadedFiles[targetId] = entry;
-            }
-          } catch (err) {
-            showError(wrapper, err.message);
-          }
+            if (Array.isArray(uploadedFiles[targetId])) uploadedFiles[targetId].push(entry);
+            else uploadedFiles[targetId] = entry;
+          } catch (err) { showError(wrapper, err.message); }
         }
         renderFileList();
       };
-
       input.addEventListener("change", (e) => handleFiles(Array.from(e.target.files || [])));
-
       dropEl.addEventListener("dragover", (e) => { e.preventDefault(); dropEl.classList.add("eg-drag"); });
       dropEl.addEventListener("dragleave", () => dropEl.classList.remove("eg-drag"));
-      dropEl.addEventListener("drop", (e) => {
-        e.preventDefault();
-        dropEl.classList.remove("eg-drag");
-        handleFiles(Array.from(e.dataTransfer.files || []));
-      });
-
+      dropEl.addEventListener("drop", (e) => { e.preventDefault(); dropEl.classList.remove("eg-drag"); handleFiles(Array.from(e.dataTransfer.files || [])); });
       listEl.addEventListener("click", (e) => {
         const btn = e.target.closest("[data-remove]");
         if (!btn) return;
         const idx = Number(btn.dataset.idx);
-        if (Array.isArray(uploadedFiles[targetId])) {
-          uploadedFiles[targetId].splice(idx, 1);
-        } else {
-          uploadedFiles[targetId] = null;
-        }
+        if (Array.isArray(uploadedFiles[targetId])) uploadedFiles[targetId].splice(idx, 1);
+        else uploadedFiles[targetId] = null;
         renderFileList();
       });
     });
 
-    // Nút chấm bài
+    // ------------------------------------------------------------------
+    // Nút "Chấm bài ngay"
+    // ------------------------------------------------------------------
     const gradeBtn = wrapper.querySelector("#eg-grade-btn");
     const progressWrap = wrapper.querySelector("#eg-progress-wrap");
     const progressLabel = wrapper.querySelector("#eg-progress-label");
+    const resultsWrap = wrapper.querySelector("#eg-results-wrap");
+    const resultsContainer = wrapper.querySelector("#eg-results-container");
+    const submitAdminBtn = wrapper.querySelector("#eg-submit-admin-btn");
+    const submitAdminCard = wrapper.querySelector("#eg-submit-admin-card");
 
     gradeBtn.addEventListener("click", async () => {
       clearError(wrapper);
+      resultsWrap.classList.remove("eg-active");
       const apiKey = wrapper.querySelector("#eg-apikey").value.trim();
       const model = wrapper.querySelector("#eg-model").value;
       const editLevel = wrapper.querySelector("#eg-editlevel").value;
@@ -868,12 +1208,8 @@ nếu Rubric không nêu, dùng thang 10.
       if (!uploadedFiles.studentEssay) return showError(wrapper, "Vui lòng upload bài làm của sinh viên.");
 
       if (global.localStorage) {
-        if (remember) {
-          global.localStorage.setItem(CONFIG.storageKeyApiKey, apiKey);
-          global.localStorage.setItem(CONFIG.storageKeyModel, model);
-        } else {
-          global.localStorage.removeItem(CONFIG.storageKeyApiKey);
-        }
+        if (remember) { global.localStorage.setItem(CONFIG.storageKeyApiKey, apiKey); global.localStorage.setItem(CONFIG.storageKeyModel, model); }
+        else global.localStorage.removeItem(CONFIG.storageKeyApiKey);
       }
 
       const engine = new EssayGraderEngine({ apiKey, model });
@@ -883,18 +1219,30 @@ nếu Rubric không nêu, dùng thang 10.
       try {
         const result = await engine.grade(
           {
-            assignment: uploadedFiles.assignment,
-            rubric: uploadedFiles.rubric,
-            answerKey: uploadedFiles.answerKey,
-            exampleEssays: uploadedFiles.exampleEssays,
-            knowledgeBase: uploadedFiles.knowledgeBase,
-            studentEssay: uploadedFiles.studentEssay,
-            teacherInstructions,
-            editLevel,
+            assignment: uploadedFiles.assignment, rubric: uploadedFiles.rubric, answerKey: uploadedFiles.answerKey,
+            exampleEssays: uploadedFiles.exampleEssays, knowledgeBase: uploadedFiles.knowledgeBase,
+            studentEssay: uploadedFiles.studentEssay, teacherInstructions, editLevel,
           },
           (msg) => { progressLabel.textContent = msg; }
         );
-        renderResults(wrapper, result);
+        resultsContainer.innerHTML = buildResultsBlockHTML(result);
+        wireResultsBlock(resultsContainer);
+        resultsWrap.classList.add("eg-active");
+        resultsWrap.scrollIntoView({ behavior: "smooth", block: "start" });
+
+        lastGradeContext = {
+          assignmentName: uploadedFiles.assignment?.name || "",
+          studentEssayName: uploadedFiles.studentEssay?.name || "",
+          studentEssayContent: uploadedFiles.studentEssay?.content || "",
+          aiResult: result,
+        };
+
+        const loggedIn = !!currentAuthUser();
+        submitAdminCard.style.display = loggedIn ? "block" : "none";
+        wrapper.querySelector("#eg-submit-toast").classList.remove("eg-active");
+        wrapper.querySelector("#eg-submit-error").classList.remove("eg-active");
+        submitAdminBtn.disabled = false;
+        submitAdminBtn.innerHTML = `<i class="fa-solid fa-paper-plane"></i> Gửi bài cho Admin`;
       } catch (err) {
         showError(wrapper, err.message || String(err));
       } finally {
@@ -902,17 +1250,120 @@ nếu Rubric không nêu, dùng thang 10.
         progressWrap.classList.remove("eg-active");
       }
     });
-  }
 
-  function showError(wrapper, msg) {
-    const el = wrapper.querySelector("#eg-error");
-    el.textContent = msg;
-    el.classList.add("eg-active");
-  }
-  function clearError(wrapper) {
-    const el = wrapper.querySelector("#eg-error");
-    el.textContent = "";
-    el.classList.remove("eg-active");
+    submitAdminBtn.addEventListener("click", async () => {
+      if (!lastGradeContext) return;
+      const toastEl = wrapper.querySelector("#eg-submit-toast");
+      const errorEl = wrapper.querySelector("#eg-submit-error");
+      toastEl.classList.remove("eg-active"); errorEl.classList.remove("eg-active");
+      submitAdminBtn.disabled = true;
+      try {
+        await submitToAdmin(lastGradeContext);
+        toastEl.textContent = "Đã gửi bài cho Admin. Bạn có thể theo dõi ở tab \"Bài đã nộp của tôi\".";
+        toastEl.classList.add("eg-active");
+      } catch (err) {
+        errorEl.textContent = err.message || String(err);
+        errorEl.classList.add("eg-active");
+      } finally {
+        submitAdminBtn.disabled = false;
+      }
+    });
+
+    // ------------------------------------------------------------------
+    // Chuyển đổi giữa 3 tab chính (Chấm bài mới / Bài đã nộp / Duyệt bài)
+    // ------------------------------------------------------------------
+    const maintabsEl = wrapper.querySelector("#eg-maintabs");
+    const mainpanels = wrapper.querySelectorAll(".eg-mainpanel");
+    let mineListenerStarted = false;
+    let adminListenerStarted = false;
+
+    maintabsEl.addEventListener("click", (e) => {
+      const tabEl = e.target.closest(".eg-maintab");
+      if (!tabEl || tabEl.style.display === "none") return;
+      maintabsEl.querySelectorAll(".eg-maintab").forEach((el) => el.classList.remove("eg-active-maintab"));
+      mainpanels.forEach((p) => p.classList.remove("eg-active-mainpanel"));
+      tabEl.classList.add("eg-active-maintab");
+      wrapper.querySelector(`.eg-mainpanel[data-mainpanel="${tabEl.dataset.maintab}"]`).classList.add("eg-active-mainpanel");
+      if (tabEl.dataset.maintab === "mine") startMineListener();
+      if (tabEl.dataset.maintab === "admin") startAdminListener();
+    });
+
+    // ------------------------------------------------------------------
+    // Tab "Bài đã nộp của tôi"
+    // ------------------------------------------------------------------
+    const mineListEl = wrapper.querySelector("#eg-mine-list");
+    const mineDetailEl = wrapper.querySelector("#eg-mine-detail");
+    const countMineEl = wrapper.querySelector("#eg-count-mine");
+    let mineItemsCache = [];
+
+    function startMineListener() {
+      if (mineListenerStarted) return;
+      mineListenerStarted = true;
+      listenMySubmissions(
+        (items) => {
+          mineItemsCache = items;
+          const unread = items.filter((i) => i.status === "reviewed" && !i._seen).length;
+          countMineEl.textContent = String(items.length);
+          renderMineList(mineListEl, items, (item) => renderStudentDetail(mineDetailEl, item));
+        },
+        (err) => { mineListEl.innerHTML = `<div class="eg-empty">Không tải được danh sách (${escapeHtml(err.message || "")}). Có thể cần đăng nhập hoặc cấu hình Firestore rules.</div>`; }
+      );
+    }
+
+    // ------------------------------------------------------------------
+    // Tab "Duyệt bài học viên" (chỉ Admin)
+    // ------------------------------------------------------------------
+    const adminListEl = wrapper.querySelector("#eg-admin-list");
+    const adminDetailEl = wrapper.querySelector("#eg-admin-detail");
+    const countAdminEl = wrapper.querySelector("#eg-count-admin");
+    const onlyPendingChk = wrapper.querySelector("#eg-admin-onlypending");
+    const navBadgeEl = document.getElementById("eg-nav-badge");
+    let adminItemsCache = [];
+
+    function refreshAdminList() {
+      renderAdminList(adminListEl, adminItemsCache, onlyPendingChk.checked, (item) =>
+        renderAdminDetail(adminDetailEl, item, () => {
+          adminDetailEl.style.display = "none";
+          document.getElementById("eg-admin-list-card").style.display = "block";
+        })
+      );
+    }
+
+    function startAdminListener() {
+      if (adminListenerStarted) return;
+      adminListenerStarted = true;
+      listenAllSubmissions(
+        (items) => {
+          adminItemsCache = items;
+          const pending = items.filter((i) => i.status !== "reviewed").length;
+          countAdminEl.textContent = String(pending);
+          if (navBadgeEl) {
+            navBadgeEl.textContent = String(pending);
+            navBadgeEl.style.display = pending > 0 ? "inline-flex" : "none";
+          }
+          refreshAdminList();
+        },
+        (err) => { adminListEl.innerHTML = `<div class="eg-empty">Không tải được danh sách (${escapeHtml(err.message || "")}). Có thể cần cấu hình Firestore rules cho Admin.</div>`; }
+      );
+    }
+    onlyPendingChk.addEventListener("change", refreshAdminList);
+
+    // ------------------------------------------------------------------
+    // Hiện/ẩn tab Admin theo vai trò, và luôn khởi động 2 listener đếm badge
+    // ngay khi xác định được trạng thái đăng nhập (không cần đợi bấm vào tab)
+    // ------------------------------------------------------------------
+    waitForAuth(() => {
+      const adminTabBtn = wrapper.querySelector("#eg-maintab-admin");
+      if (isCurrentUserAdmin()) {
+        adminTabBtn.style.display = "flex";
+        startAdminListener();
+      }
+      if (currentAuthUser()) {
+        startMineListener();
+      } else {
+        mineListEl.innerHTML = `<div class="eg-empty">Đăng nhập để xem và nộp bài cho Admin.</div>`;
+      }
+    });
   }
 
   if (document.readyState === "loading") {
