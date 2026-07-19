@@ -1,11 +1,20 @@
 /* ============================================================================
-   uses.js — Hướng dẫn sử dụng & Tóm tắt chức năng
+   uses.js — Hướng dẫn sử dụng & Tóm tắt chức năng (BẢN GỘP)
    ----------------------------------------------------------------------------
    - Thuần JavaScript ES6+, không sửa HTML/CSS gốc, chỉ cần thêm:
        <script src="uses.js"></script>
-   - Nút mở hướng dẫn được gắn NGAY TẠI khu vực label tên người dùng trên
-     thanh header (#userBadge): bấm vào khu vực avatar/tên sẽ mở ra 1 menu nhỏ
-     (dropdown) với mục duy nhất "Hướng dẫn sử dụng".
+   - File này gộp đầy đủ tính năng của 2 phiên bản trước đó, KHÔNG bớt tính
+     năng nào:
+       1) Nút "Hướng dẫn sử dụng" LUÔN hiển thị ngay khi trang tải xong,
+          không phụ thuộc trạng thái đăng nhập — được chèn vào .topbar-right,
+          ngay trước khu vực tên người dùng (#userBadge). Đây là lối vào
+          chính, đảm bảo mọi người dùng (kể cả chưa đăng nhập) đều thấy được.
+       2) Đồng thời, khi #userBadge xuất hiện/hiển thị (đã đăng nhập), khu
+          vực avatar/tên đó cũng được gắn thêm một dropdown nhỏ với mục
+          "Hướng dẫn sử dụng" để bấm thẳng vào label tên vẫn mở được hướng
+          dẫn — giữ nguyên trải nghiệm của bản dropdown gốc.
+       Cả 2 lối vào đều mở chung một modal duy nhất, tránh trùng lặp nội
+       dung và dữ liệu.
    - Nội dung hướng dẫn bao trùm toàn bộ chức năng hiện có của website, chia
      đúng theo các nhóm trong sidebar (Tổng quan / Học tập / Phân tích / Hệ
      thống) cộng thêm nhóm "Tiện ích mở rộng" (các module nạp thêm bằng JS
@@ -17,7 +26,7 @@
     'use strict';
 
     /* ============================================================
-     * 1. CSS cho Modal Hướng dẫn sử dụng + Dropdown ở user-badge
+     * 1. CSS cho Modal Hướng dẫn sử dụng + Nút cố định + Dropdown
      * ============================================================ */
     const style = document.createElement('style');
     style.id = 'user-guide-styles';
@@ -88,7 +97,32 @@
             margin-top: 10px;
         }
 
-        /* ---- Dropdown gắn tại user-badge trên header ---- */
+        /* ---- Nút "Hướng dẫn sử dụng" cố định trên topbar (luôn hiển thị) ---- */
+        #userGuideBtn {
+            display: inline-flex;
+            align-items: center;
+            gap: 7px;
+            padding: 8px 14px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--card-border);
+            background: var(--card-bg-solid);
+            color: var(--text-main);
+            font-size: 13px;
+            font-weight: 700;
+            font-family: inherit;
+            cursor: pointer;
+            transition: var(--trans);
+            white-space: nowrap;
+        }
+        #userGuideBtn i { color: var(--accent); }
+        #userGuideBtn:hover { border-color: var(--accent); color: var(--accent); }
+
+        @media (max-width: 600px) {
+            #userGuideBtn span { display: none; }
+            #userGuideBtn { padding: 8px 10px; }
+        }
+
+        /* ---- Dropdown gắn tại user-badge trên header (lối vào phụ) ---- */
         #userBadge {
             position: relative;
             cursor: pointer;
@@ -255,20 +289,8 @@
     document.body.insertAdjacentHTML('beforeend', modalHtml);
 
     /* ============================================================
-     * 3. Dropdown "Hướng dẫn sử dụng" gắn vào #userBadge (label tên user)
+     * 3. Mở / đóng modal (dùng chung cho cả 2 lối vào)
      * ============================================================ */
-    function buildDropdown() {
-        const dropdown = document.createElement('div');
-        dropdown.className = 'ug-dropdown';
-        dropdown.id = 'ugDropdown';
-        dropdown.innerHTML = `
-            <button class="ug-dropdown-item" id="userGuideBtn">
-                <i class="fa-solid fa-circle-info"></i> Hướng dẫn sử dụng
-            </button>
-        `;
-        return dropdown;
-    }
-
     function openModal() {
         const modal = document.getElementById('userGuideModal');
         if (modal) modal.classList.add('show');
@@ -277,49 +299,6 @@
     function closeModal() {
         const modal = document.getElementById('userGuideModal');
         if (modal) modal.classList.remove('show');
-    }
-
-    function closeDropdown(userBadge, dropdown) {
-        dropdown.classList.remove('show');
-        userBadge.classList.remove('ug-open');
-    }
-
-    function attachToUserBadge() {
-        const userBadge = document.getElementById('userBadge');
-        if (!userBadge || userBadge.dataset.ugBound === '1') return false;
-
-        // Thêm mũi tên nhỏ để gợi ý đây là khu vực có thể bấm mở menu.
-        const caret = document.createElement('i');
-        caret.className = 'fa-solid fa-chevron-down ug-caret';
-        userBadge.appendChild(caret);
-
-        const dropdown = buildDropdown();
-        userBadge.appendChild(dropdown);
-        userBadge.dataset.ugBound = '1';
-
-        userBadge.addEventListener('click', (e) => {
-            e.stopPropagation();
-            const isOpen = dropdown.classList.contains('show');
-            if (isOpen) {
-                closeDropdown(userBadge, dropdown);
-            } else {
-                dropdown.classList.add('show');
-                userBadge.classList.add('ug-open');
-            }
-        });
-
-        dropdown.querySelector('#userGuideBtn').addEventListener('click', (e) => {
-            e.stopPropagation();
-            closeDropdown(userBadge, dropdown);
-            openModal();
-        });
-
-        // Bấm ra ngoài để đóng dropdown.
-        document.addEventListener('click', (e) => {
-            if (!userBadge.contains(e.target)) closeDropdown(userBadge, dropdown);
-        });
-
-        return true;
     }
 
     function bindModalClose() {
@@ -336,28 +315,27 @@
         });
     }
 
-    /**
-     * #userBadge có thể bị ẩn (style="display:none;") lúc trang vừa tải, và chỉ
-     * được hiện ra sau khi đăng nhập Google thành công. Dùng MutationObserver để
-     * tự gắn dropdown ngay khi phần tử này xuất hiện/hiển thị, không cần sửa
-     * logic đăng nhập hiện có.
-     */
-    function watchUserBadge() {
-        if (attachToUserBadge()) return;
-        const observer = new MutationObserver(() => {
-            if (attachToUserBadge()) observer.disconnect();
-        });
-        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
-    }
+    /* ============================================================
+     * 4. LỐI VÀO CHÍNH — Nút "Hướng dẫn sử dụng" cố định trên topbar,
+     *    LUÔN hiển thị ngay khi trang tải, KHÔNG phụ thuộc đăng nhập.
+     * ============================================================ */
+    function injectGuideButton() {
+        if (document.getElementById('userGuideBtn')) return true; // đã chèn rồi, tránh trùng lặp
 
-    function init() {
-        bindModalClose();
-        watchUserBadge();
-    }
+        const topbarRight = document.querySelector('.topbar-right');
+        if (!topbarRight) return false; // chưa thấy topbar, thử lại sau
 
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', init);
-    } else {
-        init();
-    }
-})();
+        const btn = document.createElement('button');
+        btn.id = 'userGuideBtn';
+        btn.type = 'button';
+        btn.innerHTML = '<i class="fa-solid fa-circle-info"></i><span>Hướng dẫn sử dụng</span>';
+        btn.title = 'Hướng dẫn sử dụng';
+        btn.addEventListener('click', openModal);
+
+        // Chèn ngay TRƯỚC khu vực tên user (#userBadge) nếu có, để nằm sát cạnh nó;
+        // nếu chưa có (chưa kịp render / chưa đăng nhập) thì chèn vào đầu topbar-right.
+        const userBadge = document.getElementById('userBadge');
+        if (userBadge) {
+            topbarRight.insertBefore(btn, userBadge);
+        } else {
+            topbarRight.insertBefore(btn, topbarRight.firstChild);
