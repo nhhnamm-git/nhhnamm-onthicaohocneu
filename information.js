@@ -895,7 +895,14 @@
         return;
       }
 
-      const updated = Object.assign({}, this._profile, {
+      // CHỈ gửi đúng các field người dùng được phép tự sửa — KHÔNG bao giờ
+      // gửi kèm role/approved/status/deleted/level/xp/xpRequired/createdAt.
+      // Lý do: (1) đây không phải field người dùng chỉnh trong form này;
+      // (2) tránh việc round-trip giá trị cũ (stale) của các field quyền hạn
+      // khiến Firestore Rules từ chối ghi nếu admin vừa thay đổi quyền của
+      // user trong lúc họ đang mở modal; (3) không để lộ đường nào ở phía
+      // client có thể gửi các field nhạy cảm này lên Firestore.
+      const editableFields = {
         displayName: (document.getElementById("profileFieldName").value || "").trim(),
         phone: (document.getElementById("profileFieldPhone").value || "").trim(),
         birthday: document.getElementById("profileFieldBirthday").value || "",
@@ -903,13 +910,14 @@
         address: (document.getElementById("profileFieldAddress").value || "").trim(),
         company: (document.getElementById("profileFieldCompany").value || "").trim(),
         position: (document.getElementById("profileFieldPosition").value || "").trim(),
-      });
+      };
 
       this.showLoading();
       try {
         if (this._fbDb) {
-          await this._fbDb.collection("users").doc(this._uid).set(updated, { merge: true });
+          await this._fbDb.collection("users").doc(this._uid).set(editableFields, { merge: true });
         }
+        const updated = Object.assign({}, this._profile, editableFields);
         this._profile = updated;
         this.syncLocalCache();
         this.renderProfile();
