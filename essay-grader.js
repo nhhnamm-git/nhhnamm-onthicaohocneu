@@ -21,6 +21,15 @@
  * bổ sung đúng field đó vào 2 hàm này (module sẽ tự log cảnh báo ra Console
  * nếu sau ~15s vẫn không nhận diện được user).
  *
+ * NHẬN DIỆN FIRESTORE DB (đã làm linh hoạt hơn)
+ * ----------------------------------------------------------------------------
+ * Tương tự, nếu bấm "Nộp bài"/"Gửi nhận xét" báo "Chưa kết nối được
+ * Firestore." dù trang đã có Firebase, nguyên nhân thường là biến DB không
+ * tên "fbDb". Hàm resolveDb() đã thử thêm global.db, global.firestore, và
+ * gọi global.firebase.firestore() nếu có. Nếu vẫn báo lỗi, mở Console gõ
+ * `typeof fbDb`, `typeof db`, `typeof firebase` để biết đúng tên biến DB
+ * thật của trang, rồi bổ sung vào resolveDb().
+ *
  * LUỒNG HOẠT ĐỘNG (workflow mới)
  * ----------------------------------------------------------------------------
  * 1. Học viên vào tab "Chấm bài luận AI" → upload Assignment/Rubric/Answer Key/
@@ -654,8 +663,52 @@ nếu Rubric không nêu, dùng thang 10.
   // ==========================================================================
   // 4. TÍCH HỢP FIRESTORE — NỘP BÀI CHO ADMIN / DUYỆT / GỬI NHẬN XÉT
   // ==========================================================================
+  // --------------------------------------------------------------------
+  // Nhận diện Firestore DB instance / FieldValue.
+  // --------------------------------------------------------------------
+  // Bản trước chỉ nhận đúng 1 biến: global.fbDb (+ global.firebase.firestore
+  // cho FieldValue). Nếu trang thực tế đặt tên khác (vd `db`, `firestore`,
+  // hoặc chỉ gọi firebase.firestore() mà chưa gán ra biến global nào), toàn
+  // bộ thao tác Firestore sẽ báo "Chưa kết nối được Firestore." dù Firebase
+  // đã init đúng. Các hàm dưới đây thử lần lượt vài kiểu phổ biến.
+  function resolveDb() {
+    if (global.fbDb && typeof global.fbDb.collection === "function") return global.fbDb;
+    if (global.db && typeof global.db.collection === "function") return global.db;
+    if (global.firestore && typeof global.firestore.collection === "function") return global.firestore;
+    if (global.firebase && typeof global.firebase.firestore === "function") {
+      try {
+        const inst = global.firebase.firestore();
+        if (inst && typeof inst.collection === "function") return inst;
+      } catch (e) { /* firebase app có thể chưa init — bỏ qua */ }
+    }
+    return null;
+  }
+
+  function resolveServerTimestamp() {
+    if (global.firebase && global.firebase.firestore && global.firebase.firestore.FieldValue) {
+      return global.firebase.firestore.FieldValue.serverTimestamp();
+    }
+    // Không có FieldValue (vd SDK modular v9 không gắn global "firebase") —
+    // dùng giờ máy khách để không chặn hẳn thao tác, kèm cảnh báo debug.
+    console.warn("[essay-grader] Không tìm thấy firebase.firestore.FieldValue.serverTimestamp() — dùng giờ máy khách thay thế.");
+    return new Date();
+  }
+
+  let _egDbDebugLogged = false;
+  function debugDbOnceIfMissing() {
+    if (_egDbDebugLogged || resolveDb()) return;
+    _egDbDebugLogged = true;
+    console.warn(
+      "[essay-grader] Không nhận diện được Firestore DB qua fbDb/db/firestore/firebase.firestore(). " +
+      "Hãy mở Console gõ `typeof fbDb`, `typeof firebase`, `typeof db` để xem trang bạn đang lưu Firestore " +
+      "instance ở biến nào, rồi bổ sung đúng tên đó vào hàm resolveDb() trong essay-grader.js."
+    );
+  }
+
   function firestoreReady() {
-    return !!(global.fbDb && global.firebase && global.firebase.firestore);
+    const ready = !!resolveDb();
+    if (!ready) debugDbOnceIfMissing();
+    return ready;
   }
 
   // --------------------------------------------------------------------
@@ -740,7 +793,7 @@ nếu Rubric không nêu, dùng thang 10.
     const user = currentAuthUser();
     if (!user) throw new Error("Bạn cần đăng nhập để nộp bài.");
 
-    const now = global.firebase.firestore.FieldValue.serverTimestamp();
+    const now = resolveServerTimestamp();
     const docData = {
       // --- Thông tin User ---
       studentUid: user.uid,
@@ -776,14 +829,14 @@ nếu Rubric không nêu, dùng thang 10.
       throw new Error("Bài nộp (toàn bộ tài liệu + kết quả AI) quá lớn để lưu (vượt giới hạn ~1MB của Firestore). Hãy rút gọn Rubric/Đáp án/Bài mẫu/Knowledge Base/Bài làm rồi chấm và nộp lại.");
     }
 
-    return global.fbDb.collection(CONFIG.firestoreCollection).add(docData);
+    return resolveDb().collection(CONFIG.firestoreCollection).add(docData);
   }
 
   function listenMySubmissions(onChange, onError) {
     if (!firestoreReady()) return () => {};
     const user = currentAuthUser();
     if (!user) return () => {};
-    return global.fbDb.collection(CONFIG.firestoreCollection)
+    return resolveDb().collection(CONFIG.firestoreCollection)
       .where("studentUid", "==", user.uid)
       .orderBy("submittedAt", "desc")
       .onSnapshot(
@@ -794,7 +847,7 @@ nếu Rubric không nêu, dùng thang 10.
 
   function listenAllSubmissions(onChange, onError) {
     if (!firestoreReady()) return () => {};
-    return global.fbDb.collection(CONFIG.firestoreCollection)
+    return resolveDb().collection(CONFIG.firestoreCollection)
       .orderBy("submittedAt", "desc")
       .onSnapshot(
         (snap) => onChange(snap.docs.map((d) => ({ id: d.id, ...d.data() }))),
@@ -806,8 +859,8 @@ nếu Rubric không nêu, dùng thang 10.
     if (!firestoreReady()) throw new Error("Chưa kết nối được Firestore.");
     const user = currentAuthUser();
     if (!user) throw new Error("Bạn cần đăng nhập.");
-    const now = global.firebase.firestore.FieldValue.serverTimestamp();
-    return global.fbDb.collection(CONFIG.firestoreCollection).doc(submissionId).update({
+    const now = resolveServerTimestamp();
+    return resolveDb().collection(CONFIG.firestoreCollection).doc(submissionId).update({
       status: "reviewed",
       teacherComment: feedbackText || "",
       teacherScore: (teacherScore === "" || teacherScore == null || isNaN(teacherScore)) ? null : Number(teacherScore),
