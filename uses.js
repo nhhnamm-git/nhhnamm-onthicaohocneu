@@ -339,3 +339,109 @@
             topbarRight.insertBefore(btn, userBadge);
         } else {
             topbarRight.insertBefore(btn, topbarRight.firstChild);
+        }
+        return true;
+    }
+
+    /**
+     * .topbar-right luôn có sẵn trong HTML ngay từ đầu (không ẩn), nên bình
+     * thường chỉ cần gọi 1 lần là xong. Vẫn thêm MutationObserver dự phòng
+     * để tự chèn lại nếu có đoạn code khác trong trang render/ghi đè lại
+     * header sau này (ví dụ sau khi đăng nhập xong).
+     */
+    function watchTopbar() {
+        if (injectGuideButton()) return;
+        const observer = new MutationObserver(() => {
+            if (injectGuideButton()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    /* ============================================================
+     * 5. LỐI VÀO PHỤ — Dropdown gắn vào #userBadge (label tên user),
+     *    chỉ xuất hiện khi đã đăng nhập / #userBadge hiển thị.
+     * ============================================================ */
+    function buildDropdown() {
+        const dropdown = document.createElement('div');
+        dropdown.className = 'ug-dropdown';
+        dropdown.id = 'ugDropdown';
+        dropdown.innerHTML = `
+            <button class="ug-dropdown-item" id="userGuideDropdownBtn">
+                <i class="fa-solid fa-circle-info"></i> Hướng dẫn sử dụng
+            </button>
+        `;
+        return dropdown;
+    }
+
+    function closeDropdown(userBadge, dropdown) {
+        dropdown.classList.remove('show');
+        userBadge.classList.remove('ug-open');
+    }
+
+    function attachToUserBadge() {
+        const userBadge = document.getElementById('userBadge');
+        if (!userBadge || userBadge.dataset.ugBound === '1') return false;
+
+        // Thêm mũi tên nhỏ để gợi ý đây là khu vực có thể bấm mở menu.
+        const caret = document.createElement('i');
+        caret.className = 'fa-solid fa-chevron-down ug-caret';
+        userBadge.appendChild(caret);
+
+        const dropdown = buildDropdown();
+        userBadge.appendChild(dropdown);
+        userBadge.dataset.ugBound = '1';
+
+        userBadge.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isOpen = dropdown.classList.contains('show');
+            if (isOpen) {
+                closeDropdown(userBadge, dropdown);
+            } else {
+                dropdown.classList.add('show');
+                userBadge.classList.add('ug-open');
+            }
+        });
+
+        dropdown.querySelector('#userGuideDropdownBtn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            closeDropdown(userBadge, dropdown);
+            openModal();
+        });
+
+        // Bấm ra ngoài để đóng dropdown.
+        document.addEventListener('click', (e) => {
+            if (!userBadge.contains(e.target)) closeDropdown(userBadge, dropdown);
+        });
+
+        return true;
+    }
+
+    /**
+     * #userBadge có thể bị ẩn (style="display:none;") lúc trang vừa tải, và chỉ
+     * được hiện ra sau khi đăng nhập Google thành công. Dùng MutationObserver để
+     * tự gắn dropdown ngay khi phần tử này xuất hiện/hiển thị, không cần sửa
+     * logic đăng nhập hiện có.
+     */
+    function watchUserBadge() {
+        if (attachToUserBadge()) return;
+        const observer = new MutationObserver(() => {
+            if (attachToUserBadge()) observer.disconnect();
+        });
+        observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class'] });
+    }
+
+    /* ============================================================
+     * 6. Khởi tạo
+     * ============================================================ */
+    function init() {
+        bindModalClose();
+        watchTopbar();     // Lối vào chính: nút cố định trên topbar
+        watchUserBadge();  // Lối vào phụ: dropdown tại #userBadge
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
