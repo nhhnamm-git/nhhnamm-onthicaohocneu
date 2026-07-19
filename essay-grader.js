@@ -90,11 +90,11 @@
         endpoint: "https://generativelanguage.googleapis.com/v1beta/models",
         keyLabel: "Google Gemini API Key",
         keyPlaceholder: "AIza...",
-        defaultModel: "gemini-2.5-flash",
+        defaultModel: "gemini-3.5-flash",
         models: [
-          { value: "gemini-2.5-flash", label: "gemini-2.5-flash (miễn phí, khuyên dùng)" },
-          { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite (miễn phí, hạn mức cao hơn)" },
-          { value: "gemini-2.5-pro", label: "gemini-2.5-pro (miễn phí, hạn mức thấp)" },
+          { value: "gemini-3.5-flash", label: "gemini-3.5-flash (khuyên dùng)" },
+          { value: "gemini-3.1-flash-lite", label: "gemini-3.1-flash-lite (nhanh nhất, hạn mức cao hơn)" },
+          { value: "gemini-3.1-pro", label: "gemini-3.1-pro (mạnh nhất, hạn mức thấp)" },
         ],
       },
     },
@@ -407,13 +407,78 @@ nếu Rubric không nêu, dùng thang 10.
       const safeKey = sanitizeApiKey(this.apiKey);
       if (!safeKey) throw new Error("API key rỗng hoặc chỉ chứa ký tự không hợp lệ. Hãy xoá ô API key và dán/gõ lại.");
       this.apiKey = safeKey;
-      return this.provider === "gemini" ? this._callGemini(userPrompt) : this._callAnthropic(userPrompt);
+      try {
+        return this.provider === "gemini" ? await this._callGemini(userPrompt) : await this._callAnthropic(userPrompt);
+      } catch (err) {
+        // fetch() ném TypeError khi không kết nối được mạng, bị CORS/tường lửa/
+        // trình chặn quảng cáo chặn request — khác hẳn lỗi HTTP có phản hồi.
+        if (err instanceof TypeError) {
+          throw new Error(
+            "Không kết nối được tới máy chủ AI. Nguyên nhân thường gặp: (1) mất mạng Internet, " +
+            "(2) trình chặn quảng cáo/extension (uBlock, AdGuard, Brave Shield...) đang chặn request tới " +
+            (this.provider === "gemini" ? "generativelanguage.googleapis.com" : "api.anthropic.com") +
+            ", (3) tường lửa công ty/trường học/VPN chặn domain này. Hãy thử tắt extension chặn quảng cáo hoặc đổi mạng rồi thử lại."
+          );
+        }
+        throw err;
+      }
     }
-    _friendlyApiError(status, body) {
-      if (status === 401 || status === 403) return "API key không hợp lệ, sai, hoặc không có quyền truy cập. Kiểm tra lại key vừa nhập (và nhà cung cấp đã chọn có khớp với key không).";
-      if (status === 429) return "Đã vượt hạn mức (rate limit / quota) của key này. Với gói miễn phí, hãy đợi vài phút hoặc đổi sang model có hạn mức cao hơn.";
-      if (status >= 500) return "Máy chủ AI đang gặp sự cố tạm thời, hãy thử lại sau.";
-      return body || String(status);
+    // Phân loại lỗi HTTP trả về từ API thành thông báo tiếng Việt cụ thể, dễ
+    // hành động — thay vì chỉ hiện nguyên JSON lỗi thô của nhà cung cấp.
+    _friendlyApiError(status, bodyText, provider) {
+      let parsed = null;
+      try { parsed = JSON.parse(bodyText); } catch (e) { /* body không phải JSON, bỏ qua */ }
+
+      const rawMessage = (parsed && parsed.error && parsed.error.message) || "";
+      const errType = (parsed && parsed.error && (parsed.error.type || parsed.error.status)) || "";
+      const lowerMsg = rawMessage.toLowerCase();
+
+      // --- Hết credit / chưa bật thanh toán ---
+      if (lowerMsg.includes("credit balance") || lowerMsg.includes("purchase credit") || lowerMsg.includes("insufficient")) {
+        return provider === "gemini"
+          ? `Tài khoản Google chưa đủ hạn mức/thanh toán cho model trả phí này. Vào Google AI Studio → Billing để kiểm tra, hoặc đổi sang model có hạn mức miễn phí cao hơn (gemini-3.1-flash-lite).${rawMessage ? ` (Chi tiết từ Google: "${rawMessage}")` : ""}`
+          : `Tài khoản Anthropic đã HẾT CREDIT (số dư quá thấp để gọi API). Vào console.anthropic.com → mục "Plans & Billing" để nạp thêm credit hoặc nâng cấp gói, sau đó chấm lại bài. Nếu chỉ mới nạp tiền, đợi 1-2 phút để hệ thống cập nhật số dư.${rawMessage ? ` (Chi tiết từ Anthropic: "${rawMessage}")` : ""}`;
+      }
+
+      // --- Sai / hết hạn API key ---
+      if (status === 401 || errType === "authentication_error" || errType === "UNAUTHENTICATED") {
+        return "API key không hợp lệ, gõ/dán sai, hoặc đã bị thu hồi. Hãy tạo key mới trong console/AI Studio và dán lại vào ô API Key (nhớ chọn đúng Nhà cung cấp AI tương ứng với key).";
+      }
+
+      // --- Không đủ quyền ---
+      if (status === 403 || errType === "permission_error" || errType === "PERMISSION_DENIED") {
+        return provider === "gemini"
+          ? "Key không có quyền dùng model này — có thể do project chưa bật 'Generative Language API', key bị giới hạn theo API/IP, hoặc model chỉ khả dụng ở một số khu vực. Kiểm tra lại trong Google AI Studio / Google Cloud Console."
+          : "Key không có quyền dùng model đã chọn, hoặc tài khoản đang bị hạn chế. Kiểm tra lại quyền của key trong console.anthropic.com → API Keys.";
+      }
+
+      // --- Không tìm thấy model ---
+      if (status === 404 || errType === "not_found_error" || errType === "NOT_FOUND") {
+        return `Không tìm thấy model "${this.model}" — có thể do gõ sai tên, model đã ngừng hỗ trợ, hoặc chưa khả dụng với key/khu vực này. Hãy thử chọn lại model khác trong danh sách thả xuống.`;
+      }
+
+      // --- Request sai định dạng / vượt giới hạn token đầu vào ---
+      if (status === 400 || errType === "invalid_request_error" || errType === "INVALID_ARGUMENT") {
+        return `Yêu cầu gửi lên không hợp lệ${rawMessage ? `: "${rawMessage}"` : ""}. Nguyên nhân thường gặp: tổng dung lượng Rubric/Đáp án/Bài mẫu/Knowledge Base/Bài làm quá dài, vượt giới hạn ngữ cảnh của model. Hãy thử rút gọn bớt tài liệu (đặc biệt Knowledge Base/Bài mẫu) rồi chấm lại.`;
+      }
+
+      // --- Vượt hạn mức / gọi quá nhanh ---
+      if (status === 429 || errType === "rate_limit_error" || errType === "RESOURCE_EXHAUSTED") {
+        return provider === "gemini"
+          ? "Đã vượt hạn mức miễn phí (số lượt gọi/phút hoặc /ngày của Gemini). Đợi vài phút rồi thử lại, hoặc đổi sang model gemini-3.1-flash-lite (hạn mức cao hơn)."
+          : "Đã vượt rate limit của tài khoản Anthropic (gọi quá nhanh/quá nhiều trong thời gian ngắn, hoặc gói đang ở mức thấp). Đợi khoảng 1 phút rồi thử chấm lại.";
+      }
+
+      // --- Quá tải / lỗi phía máy chủ nhà cung cấp ---
+      if (status === 529 || errType === "overloaded_error") {
+        return "Máy chủ Anthropic đang quá tải tạm thời (không phải lỗi của bạn hay của ứng dụng). Vui lòng thử lại sau ít phút.";
+      }
+      if (status >= 500) {
+        return "Máy chủ AI đang gặp sự cố tạm thời phía nhà cung cấp. Vui lòng thử lại sau ít phút; nếu vẫn lỗi, hãy đổi sang model hoặc nhà cung cấp khác.";
+      }
+
+      // --- Không khớp trường hợp nào ở trên ---
+      return rawMessage || (bodyText ? bodyText.slice(0, 300) : `Lỗi không xác định (HTTP ${status}).`);
     }
     async _callAnthropic(userPrompt) {
       const conf = CONFIG.providers.anthropic;
@@ -432,11 +497,13 @@ nếu Rubric không nêu, dùng thang 10.
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        throw new Error(`Lỗi gọi Anthropic API (HTTP ${res.status}): ${this._friendlyApiError(res.status, body)}`);
+        throw new Error(`Lỗi gọi Anthropic API (HTTP ${res.status}): ${this._friendlyApiError(res.status, body, "anthropic")}`);
       }
-      const data = await res.json();
+      let data;
+      try { data = await res.json(); }
+      catch (e) { throw new Error("Anthropic trả về dữ liệu không đúng định dạng JSON (có thể do lỗi mạng giữa chừng). Hãy thử chấm lại."); }
       const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n");
-      if (!text) throw new Error("AI không trả về nội dung.");
+      if (!text) throw new Error("AI không trả về nội dung (phản hồi rỗng). Hãy thử chấm lại, hoặc rút gọn tài liệu nếu bài quá dài.");
       return text;
     }
     async _callGemini(userPrompt) {
@@ -460,15 +527,20 @@ nếu Rubric không nêu, dùng thang 10.
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        throw new Error(`Lỗi gọi Gemini API (HTTP ${res.status}): ${this._friendlyApiError(res.status, body)}`);
+        throw new Error(`Lỗi gọi Gemini API (HTTP ${res.status}): ${this._friendlyApiError(res.status, body, "gemini")}`);
       }
-      const data = await res.json();
+      let data;
+      try { data = await res.json(); }
+      catch (e) { throw new Error("Gemini trả về dữ liệu không đúng định dạng JSON (có thể do lỗi mạng giữa chừng). Hãy thử chấm lại."); }
       const candidate = (data.candidates || [])[0];
       const parts = (candidate && candidate.content && candidate.content.parts) || [];
       const text = parts.map((p) => p.text || "").filter(Boolean).join("\n");
       if (!text) {
         const blockReason = data.promptFeedback && data.promptFeedback.blockReason;
-        throw new Error(blockReason ? `Gemini từ chối trả lời (lý do: ${blockReason}).` : "AI không trả về nội dung.");
+        const finishReason = candidate && candidate.finishReason;
+        if (blockReason) throw new Error(`Gemini từ chối trả lời vì lý do an toàn nội dung (${blockReason}). Kiểm tra lại nội dung bài làm/tài liệu đã upload.`);
+        if (finishReason === "MAX_TOKENS") throw new Error("Gemini bị cắt giữa chừng do vượt giới hạn token đầu ra. Hãy thử rút gọn tài liệu đầu vào hoặc đổi sang model khác.");
+        throw new Error("AI không trả về nội dung (phản hồi rỗng). Hãy thử chấm lại, hoặc rút gọn tài liệu nếu bài quá dài.");
       }
       return text;
     }
@@ -988,7 +1060,7 @@ nếu Rubric không nêu, dùng thang 10.
             <li>Bấm <strong>Create API key</strong> → chọn hoặc để hệ thống tự tạo một Google Cloud project (miễn phí, <strong>không cần thẻ thanh toán</strong>).</li>
             <li>Copy chuỗi bắt đầu bằng <code>AIza...</code>.</li>
             <li>Dán vào ô "API Key" bên trên, đảm bảo Nhà cung cấp AI đang chọn là <strong>Google Gemini</strong>.</li>
-            <li>Gói miễn phí có giới hạn số lượt gọi/phút và /ngày tuỳ model. Nếu gặp lỗi <strong>HTTP 429</strong> (quá hạn mức), đợi vài phút hoặc đổi sang model <code>gemini-2.5-flash-lite</code> (hạn mức cao hơn).</li>
+            <li>Gói miễn phí có giới hạn số lượt gọi/phút và /ngày tuỳ model. Nếu gặp lỗi <strong>HTTP 429</strong> (quá hạn mức), đợi vài phút hoặc đổi sang model <code>gemini-3.1-flash-lite</code> (hạn mức cao hơn). Danh sách model có thể thay đổi theo thời gian — nếu model nào báo lỗi "not found", hãy kiểm tra tên model mới nhất tại <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Google AI Studio</a> (mục chọn model khi chat thử) rồi báo lại để cập nhật danh sách trong ứng dụng.</li>
           </ol>
         </details>
       </div>
