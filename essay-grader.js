@@ -99,7 +99,12 @@
       },
     },
     defaultProvider: "anthropic",
-    maxTokens: 8000,
+    // Schema JSON yêu cầu RẤT chi tiết (chấm từng câu/đoạn + tóm tắt 10 mục),
+    // nên với bài luận dài, phản hồi rất dễ vượt quá giới hạn token và bị CẮT
+    // GIỮA CHỪNG (gây lỗi "Expected ',' or ']'..." khi parse JSON). Để 16000
+    // (thay vì 8000 trước đây) nhằm giảm mạnh khả năng này. Có thể tăng thêm
+    // nếu bài luận rất dài và vẫn còn bị cắt (miễn model được chọn hỗ trợ).
+    maxTokens: 16000,
     storageKeyApiKey: "essayGrader.apiKey",   // sẽ nối thêm ".<provider>"
     storageKeyModel: "essayGrader.model",     // sẽ nối thêm ".<provider>"
     storageKeyProvider: "essayGrader.provider",
@@ -331,6 +336,48 @@ nếu Rubric không nêu, dùng thang 10.
   function sanitizeApiKey(raw) {
     return String(raw == null ? "" : raw).replace(/[^\x21-\x7E]/g, "");
   }
+  // Cố gắng "sửa" một chuỗi JSON bị cắt dở giữa chừng (do AI vượt giới hạn
+  // token đầu ra) thành JSON hợp lệ tối đa có thể — bằng cách: đóng chuỗi
+  // đang dở (nếu bị cắt giữa 1 string), bỏ dấu phẩy thừa ở cuối, rồi tự đóng
+  // lại toàn bộ { và [ còn đang mở theo đúng thứ tự ngược. Đây là phục hồi
+  // "best-effort": không đảm bảo khôi phục 100% dữ liệu bị mất, nhưng giúp
+  // hiển thị được phần kết quả đã chấm thay vì báo lỗi trắng tay.
+  function repairTruncatedJson(text) {
+    if (!text || typeof text !== "string") return null;
+    const stack = [];
+    let inString = false;
+    let escapeNext = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escapeNext) escapeNext = false;
+        else if (ch === "\\") escapeNext = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') { inString = true; continue; }
+      if (ch === "{" || ch === "[") stack.push(ch);
+      else if (ch === "}" || ch === "]") stack.pop();
+    }
+    if (stack.length === 0 && !inString) return null; // JSON coi như đã cân bằng — không phải lỗi do bị cắt
+
+    let repaired = text;
+    if (inString) repaired += '"'; // đóng chuỗi đang dở
+    repaired = repaired.replace(/,\s*$/, ""); // bỏ dấu phẩy thừa ngay trước điểm cắt
+    // Nếu điểm cắt rơi ngay sau dấu ":" (thiếu hẳn value) hoặc sau 1 key chưa
+    // có ":", lùi lại tới dấu phẩy/ngoặc gần nhất trước đó để cắt bỏ phần tử
+    // dở dang này, tránh JSON.parse thất bại vì thiếu value.
+    const danglingKeyOrColon = /"(?:[^"\\]|\\.)*"\s*:\s*$/;
+    if (danglingKeyOrColon.test(repaired.replace(/,\s*$/, ""))) {
+      const lastComma = Math.max(repaired.lastIndexOf(","), repaired.lastIndexOf("{"), repaired.lastIndexOf("["));
+      if (lastComma > -1) repaired = repaired.slice(0, lastComma).replace(/,\s*$/, "");
+    }
+    for (let i = stack.length - 1; i >= 0; i--) {
+      repaired += stack[i] === "{" ? "}" : "]";
+    }
+    try { return JSON.parse(repaired); }
+    catch (e) { return null; }
+  }
   function escapeHtml(str) {
     return String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -388,7 +435,7 @@ nếu Rubric không nêu, dùng thang 10.
       progress("Đang gửi cho AI chấm bài (xây tiêu chí, đối chiếu, chấm điểm, phân tích)...");
       const raw = await this._call(userPrompt);
       progress("Đang phân tích kết quả trả về...");
-      const result = this._parse(raw);
+      const result = this._parse(raw.text, raw.truncated);
       const studentText = this._normalize(inputs.studentEssay);
       const offline = computeStatistics(studentText);
       result.statistics = {
@@ -504,7 +551,8 @@ nếu Rubric không nêu, dùng thang 10.
       catch (e) { throw new Error("Anthropic trả về dữ liệu không đúng định dạng JSON (có thể do lỗi mạng giữa chừng). Hãy thử chấm lại."); }
       const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n");
       if (!text) throw new Error("AI không trả về nội dung (phản hồi rỗng). Hãy thử chấm lại, hoặc rút gọn tài liệu nếu bài quá dài.");
-      return text;
+      const truncated = data.stop_reason === "max_tokens";
+      return { text, truncated };
     }
     async _callGemini(userPrompt) {
       const conf = CONFIG.providers.gemini;
@@ -535,21 +583,45 @@ nếu Rubric không nêu, dùng thang 10.
       const candidate = (data.candidates || [])[0];
       const parts = (candidate && candidate.content && candidate.content.parts) || [];
       const text = parts.map((p) => p.text || "").filter(Boolean).join("\n");
+      const finishReason = candidate && candidate.finishReason;
       if (!text) {
         const blockReason = data.promptFeedback && data.promptFeedback.blockReason;
-        const finishReason = candidate && candidate.finishReason;
         if (blockReason) throw new Error(`Gemini từ chối trả lời vì lý do an toàn nội dung (${blockReason}). Kiểm tra lại nội dung bài làm/tài liệu đã upload.`);
-        if (finishReason === "MAX_TOKENS") throw new Error("Gemini bị cắt giữa chừng do vượt giới hạn token đầu ra. Hãy thử rút gọn tài liệu đầu vào hoặc đổi sang model khác.");
+        if (finishReason === "MAX_TOKENS") throw new Error("Gemini bị cắt giữa chừng do vượt giới hạn token đầu ra, không kịp sinh ra nội dung nào. Hãy thử rút gọn tài liệu đầu vào hoặc đổi sang model khác.");
         throw new Error("AI không trả về nội dung (phản hồi rỗng). Hãy thử chấm lại, hoặc rút gọn tài liệu nếu bài quá dài.");
       }
-      return text;
+      return { text, truncated: finishReason === "MAX_TOKENS" };
     }
-    _parse(text) {
+    _parse(text, wasTruncated) {
       let cleaned = text.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "");
       const a = cleaned.indexOf("{"), b = cleaned.lastIndexOf("}");
       if (a !== -1 && b !== -1 && b > a) cleaned = cleaned.slice(a, b + 1);
-      try { return JSON.parse(cleaned); }
-      catch (err) { throw new Error("Không phân tích được JSON từ AI: " + err.message); }
+
+      let parsed = null;
+      let parseErr = null;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (err) {
+        parseErr = err;
+        // Bị cắt giữa chừng (do vượt giới hạn token) là nguyên nhân phổ biến
+        // nhất khiến JSON dở dang — thử phục hồi tối đa những gì có thể thay
+        // vì báo lỗi trắng tay, để người dùng vẫn xem được phần đã chấm.
+        const repaired = repairTruncatedJson(cleaned);
+        if (repaired) parsed = repaired;
+      }
+
+      if (!parsed) {
+        const reason = wasTruncated
+          ? " Nguyên nhân: phản hồi của AI bị CẮT GIỮA CHỪNG vì vượt giới hạn độ dài đầu ra (JSON yêu cầu rất chi tiết — chấm từng câu/đoạn — nên bài luận càng dài càng dễ vượt giới hạn). Cách khắc phục: (1) chọn Mức biên tập 'Light' thay vì 'Medium'/'Advanced' để JSON gọn hơn, (2) rút gọn bớt Bài mẫu/Knowledge Base/Đáp án đã upload (đây thường là phần chiếm nhiều token nhất chứ không phải bài làm), (3) thử đổi sang model khác, rồi chấm lại."
+          : " Đây thường chỉ là lỗi định dạng ngẫu nhiên từ AI — hãy thử bấm 'Chấm bài ngay' lại lần nữa.";
+        throw new Error(`Không phân tích được JSON từ AI: ${parseErr.message}.${reason}`);
+      }
+
+      if (wasTruncated) {
+        parsed._truncatedWarning =
+          "Kết quả bên dưới có thể CHƯA ĐẦY ĐỦ: phản hồi của AI đã bị cắt do vượt giới hạn độ dài đầu ra, nên một số phần phân tích (thường ở cuối, ví dụ Tổng kết cuối bài) có thể bị thiếu hoặc mất một phần dữ liệu. Nếu cần bản đầy đủ, hãy rút gọn tài liệu đầu vào (đặc biệt Bài mẫu/Knowledge Base) hoặc chọn Mức biên tập 'Light', rồi chấm lại.";
+      }
+      return parsed;
     }
   }
 
@@ -742,6 +814,11 @@ nếu Rubric không nêu, dùng thang 10.
     background: rgba(22,199,132,.1); color: var(--eg-success); font-size:12.5px; display:none;
   }
   #essay-grader-widget .eg-toast.eg-active { display:block; }
+  #essay-grader-widget .eg-warning-banner {
+    margin-bottom:14px; padding:10px 14px; border-radius: var(--eg-radius-sm);
+    background: rgba(245,158,11,.1); color:#a15c07; font-size:12.5px; line-height:1.6;
+    border:1px solid rgba(245,158,11,.3);
+  }
   #essay-grader-widget .eg-results-wrap { display:none; margin-top:18px; }
   #essay-grader-widget .eg-results-wrap.eg-active { display:block; }
   #essay-grader-widget .eg-score-row { display:flex; gap:18px; align-items:center; flex-wrap:wrap; }
@@ -951,6 +1028,7 @@ nếu Rubric không nêu, dùng thang 10.
       summary: renderFinalSummary(data.finalSummary),
     };
     return `
+      ${data._truncatedWarning ? `<div class="eg-warning-banner"><i class="fa-solid fa-triangle-exclamation"></i> ${escapeHtml(data._truncatedWarning)}</div>` : ""}
       <div class="eg-card">
         <div class="eg-score-row">
           <div class="eg-gauge">${renderGauge(data.totalScore ?? 0, maxScore)}</div>
