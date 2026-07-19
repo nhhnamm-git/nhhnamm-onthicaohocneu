@@ -45,10 +45,19 @@
  *
  * CẢNH BÁO BẢO MẬT (API KEY)
  * ----------------------------------------------------------------------------
- * Việc chấm bài (bước AI) gọi thẳng Anthropic API từ trình duyệt bằng API key
- * do người dùng tự nhập — key có thể bị xem qua DevTools trên máy của họ. Phù
- * hợp cho dùng nội bộ/lớp học nhỏ. Nếu cần an toàn hơn cho quy mô lớn, hãy đổi
- * CONFIG.apiEndpoint bên dưới sang một backend proxy riêng của bạn.
+ * Việc chấm bài (bước AI) gọi thẳng API của nhà cung cấp đã chọn (Anthropic
+ * Claude hoặc Google Gemini) từ trình duyệt, bằng API key do người dùng tự
+ * nhập — key có thể bị xem qua DevTools trên máy của họ. Phù hợp cho dùng nội
+ * bộ/lớp học nhỏ. Nếu cần an toàn hơn cho quy mô lớn, hãy đổi các endpoint
+ * trong CONFIG.providers bên dưới sang một backend proxy riêng của bạn.
+ *
+ * NHÀ CUNG CẤP AI HỖ TRỢ
+ * ----------------------------------------------------------------------------
+ * - Anthropic Claude: trả phí theo token, cần thẻ thanh toán ở console.
+ * - Google Gemini: có gói MIỄN PHÍ (giới hạn số lượt gọi/phút/ngày), không cần
+ *   thẻ thanh toán, lấy key tại aistudio.google.com/app/apikey. Phù hợp để
+ *   dùng thử hoặc lớp học không có ngân sách. Xem chi tiết cách lấy key ngay
+ *   trong giao diện (mục "Chưa có Google Gemini API key?").
  * ============================================================================
  */
 (function (global, document) {
@@ -61,11 +70,39 @@
   // 0. CẤU HÌNH
   // ==========================================================================
   const CONFIG = {
-    apiEndpoint: "https://api.anthropic.com/v1/messages",
-    defaultModel: "claude-sonnet-5",
+    // Nhiều nhà cung cấp AI để chọn — Anthropic (trả phí) hoặc Google Gemini
+    // (có gói miễn phí, phù hợp dùng thử/lớp học nhỏ không muốn trả phí).
+    providers: {
+      anthropic: {
+        label: "Anthropic Claude (trả phí)",
+        endpoint: "https://api.anthropic.com/v1/messages",
+        keyLabel: "Anthropic API Key",
+        keyPlaceholder: "sk-ant-...",
+        defaultModel: "claude-sonnet-5",
+        models: [
+          { value: "claude-sonnet-5", label: "claude-sonnet-5 (khuyên dùng)" },
+          { value: "claude-opus-4-8", label: "claude-opus-4-8 (mạnh nhất, chậm & đắt hơn)" },
+          { value: "claude-haiku-4-5-20251001", label: "claude-haiku-4-5-20251001 (nhanh, rẻ)" },
+        ],
+      },
+      gemini: {
+        label: "Google Gemini (có gói miễn phí)",
+        endpoint: "https://generativelanguage.googleapis.com/v1beta/models",
+        keyLabel: "Google Gemini API Key",
+        keyPlaceholder: "AIza...",
+        defaultModel: "gemini-2.5-flash",
+        models: [
+          { value: "gemini-2.5-flash", label: "gemini-2.5-flash (miễn phí, khuyên dùng)" },
+          { value: "gemini-2.5-flash-lite", label: "gemini-2.5-flash-lite (miễn phí, hạn mức cao hơn)" },
+          { value: "gemini-2.5-pro", label: "gemini-2.5-pro (miễn phí, hạn mức thấp)" },
+        ],
+      },
+    },
+    defaultProvider: "anthropic",
     maxTokens: 8000,
-    storageKeyApiKey: "essayGrader.apiKey",
-    storageKeyModel: "essayGrader.model",
+    storageKeyApiKey: "essayGrader.apiKey",   // sẽ nối thêm ".<provider>"
+    storageKeyModel: "essayGrader.model",     // sẽ nối thêm ".<provider>"
+    storageKeyProvider: "essayGrader.provider",
     maxScoreDefault: 10,
     firestoreCollection: "essaySubmissions",
     maxDocBytes: 900000, // Firestore giới hạn ~1MB/document, chừa biên an toàn
@@ -286,6 +323,14 @@ nếu Rubric không nêu, dùng thang 10.
     const paragraphs = trimmed ? trimmed.split(/\n\s*\n/).filter((p) => p.trim()).length : 0;
     return { words, sentences, paragraphs };
   }
+  // Loại bỏ MỌI ký tự không phải ASCII hiển thị được (32-126, và không cho cả
+  // khoảng trắng) khỏi API key. Đây là ký tự thường bị dính khi copy/paste từ
+  // Zalo, Word, web tiếng Việt... (khoảng trắng không ngắt, zero-width space,
+  // dấu ngoặc kép "thông minh"...) — chính là nguyên nhân lỗi trình duyệt
+  // "String contains non ISO-8859-1 code point" khi đưa vào HTTP header.
+  function sanitizeApiKey(raw) {
+    return String(raw == null ? "" : raw).replace(/[^\x21-\x7E]/g, "");
+  }
   function escapeHtml(str) {
     return String(str == null ? "" : str).replace(/[&<>"']/g, (c) => ({
       "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
@@ -305,9 +350,10 @@ nếu Rubric không nêu, dùng thang 10.
   // 3. GỌI AI CHẤM BÀI
   // ==========================================================================
   class EssayGraderEngine {
-    constructor({ apiKey, model }) {
+    constructor({ apiKey, model, provider }) {
       this.apiKey = apiKey;
-      this.model = model || CONFIG.defaultModel;
+      this.provider = provider && CONFIG.providers[provider] ? provider : CONFIG.defaultProvider;
+      this.model = model || CONFIG.providers[this.provider].defaultModel;
     }
     _normalize(input) {
       if (!input) return "";
@@ -355,7 +401,23 @@ nếu Rubric không nêu, dùng thang 10.
       return result;
     }
     async _call(userPrompt) {
-      const res = await fetch(CONFIG.apiEndpoint, {
+      // API key đã được sanitizeApiKey() lọc ở tầng UI trước khi tới đây, nhưng
+      // kiểm tra lại lần nữa cho chắc — tránh crash khó hiểu ở fetch() nếu có
+      // nơi khác gọi thẳng vào engine mà quên lọc.
+      const safeKey = sanitizeApiKey(this.apiKey);
+      if (!safeKey) throw new Error("API key rỗng hoặc chỉ chứa ký tự không hợp lệ. Hãy xoá ô API key và dán/gõ lại.");
+      this.apiKey = safeKey;
+      return this.provider === "gemini" ? this._callGemini(userPrompt) : this._callAnthropic(userPrompt);
+    }
+    _friendlyApiError(status, body) {
+      if (status === 401 || status === 403) return "API key không hợp lệ, sai, hoặc không có quyền truy cập. Kiểm tra lại key vừa nhập (và nhà cung cấp đã chọn có khớp với key không).";
+      if (status === 429) return "Đã vượt hạn mức (rate limit / quota) của key này. Với gói miễn phí, hãy đợi vài phút hoặc đổi sang model có hạn mức cao hơn.";
+      if (status >= 500) return "Máy chủ AI đang gặp sự cố tạm thời, hãy thử lại sau.";
+      return body || String(status);
+    }
+    async _callAnthropic(userPrompt) {
+      const conf = CONFIG.providers.anthropic;
+      const res = await fetch(conf.endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -370,11 +432,44 @@ nếu Rubric không nêu, dùng thang 10.
       });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
-        throw new Error(`Lỗi gọi API (HTTP ${res.status}): ${body || res.statusText}`);
+        throw new Error(`Lỗi gọi Anthropic API (HTTP ${res.status}): ${this._friendlyApiError(res.status, body)}`);
       }
       const data = await res.json();
       const text = (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n");
       if (!text) throw new Error("AI không trả về nội dung.");
+      return text;
+    }
+    async _callGemini(userPrompt) {
+      const conf = CONFIG.providers.gemini;
+      const url = `${conf.endpoint}/${encodeURIComponent(this.model)}:generateContent`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": this.apiKey,
+        },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
+          contents: [{ role: "user", parts: [{ text: userPrompt }] }],
+          generationConfig: {
+            maxOutputTokens: CONFIG.maxTokens,
+            temperature: 0.2,
+            responseMimeType: "application/json",
+          },
+        }),
+      });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw new Error(`Lỗi gọi Gemini API (HTTP ${res.status}): ${this._friendlyApiError(res.status, body)}`);
+      }
+      const data = await res.json();
+      const candidate = (data.candidates || [])[0];
+      const parts = (candidate && candidate.content && candidate.content.parts) || [];
+      const text = parts.map((p) => p.text || "").filter(Boolean).join("\n");
+      if (!text) {
+        const blockReason = data.promptFeedback && data.promptFeedback.blockReason;
+        throw new Error(blockReason ? `Gemini từ chối trả lời (lý do: ${blockReason}).` : "AI không trả về nội dung.");
+      }
       return text;
     }
     _parse(text) {
@@ -845,17 +940,20 @@ nếu Rubric không nêu, dùng thang 10.
       <div class="eg-card">
         <h3><i class="fa-solid fa-key"></i> Cấu hình API</h3>
         <div class="eg-config-row">
-          <div class="eg-field">
-            <label>Anthropic API Key</label>
-            <input type="password" id="eg-apikey" placeholder="sk-ant-..." />
-          </div>
-          <div class="eg-field" style="max-width:220px;">
-            <label>Model</label>
-            <select id="eg-model">
-              <option value="claude-sonnet-5">claude-sonnet-5</option>
-              <option value="claude-opus-4-8">claude-opus-4-8</option>
-              <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
+          <div class="eg-field" style="max-width:230px;">
+            <label>Nhà cung cấp AI</label>
+            <select id="eg-provider">
+              <option value="anthropic">Anthropic Claude (trả phí)</option>
+              <option value="gemini">Google Gemini (có gói miễn phí)</option>
             </select>
+          </div>
+          <div class="eg-field">
+            <label id="eg-apikey-label">Anthropic API Key</label>
+            <input type="password" id="eg-apikey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="eg-field" style="max-width:260px;">
+            <label>Model</label>
+            <select id="eg-model"></select>
           </div>
           <div class="eg-field" style="max-width:170px;">
             <label>Mức biên tập</label>
@@ -871,16 +969,26 @@ nếu Rubric không nêu, dùng thang 10.
             <input type="checkbox" id="eg-remember" style="width:auto; margin-right:5px;" checked/>
             Ghi nhớ API key trên trình duyệt này (localStorage)
           </label>
-          — key chỉ được gửi thẳng tới api.anthropic.com.
+          — key chỉ được gửi thẳng tới máy chủ của nhà cung cấp đã chọn, không qua server trung gian nào khác. Mẹo: nếu gõ/dán key bị lỗi lạ, hãy xoá trắng ô key rồi dán lại (tránh copy kèm khoảng trắng/ký tự ẩn từ Zalo, Word...).
         </div>
-        <details class="eg-apikey-help">
-          <summary><i class="fa-solid fa-circle-question"></i> Chưa có API key? Xem cách lấy nhanh</summary>
+        <details class="eg-apikey-help" id="eg-help-anthropic">
+          <summary><i class="fa-solid fa-circle-question"></i> Chưa có Anthropic API key? Xem cách lấy nhanh (trả phí)</summary>
           <ol>
             <li>Vào <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> → đăng nhập hoặc đăng ký (email/Google).</li>
             <li>Vào <strong>Settings → API Keys</strong> → bấm <strong>Create Key</strong>, đặt tên rồi tạo.</li>
             <li>Copy ngay chuỗi bắt đầu bằng <code>sk-ant-...</code> — chỉ hiện <strong>1 lần duy nhất</strong>.</li>
             <li>Vào <strong>Billing</strong> thêm phương thức thanh toán (API tính phí theo token, không có gói miễn phí vĩnh viễn).</li>
-            <li>Dán key vừa tạo vào ô bên trên.</li>
+            <li>Dán key vừa tạo vào ô "API Key" bên trên.</li>
+          </ol>
+        </details>
+        <details class="eg-apikey-help" id="eg-help-gemini" style="display:none;">
+          <summary><i class="fa-solid fa-circle-question"></i> Chưa có Google Gemini API key? Xem cách lấy nhanh (miễn phí)</summary>
+          <ol>
+            <li>Vào <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">aistudio.google.com/app/apikey</a> → đăng nhập bằng tài khoản Google.</li>
+            <li>Bấm <strong>Create API key</strong> → chọn hoặc để hệ thống tự tạo một Google Cloud project (miễn phí, <strong>không cần thẻ thanh toán</strong>).</li>
+            <li>Copy chuỗi bắt đầu bằng <code>AIza...</code>.</li>
+            <li>Dán vào ô "API Key" bên trên, đảm bảo Nhà cung cấp AI đang chọn là <strong>Google Gemini</strong>.</li>
+            <li>Gói miễn phí có giới hạn số lượt gọi/phút và /ngày tuỳ model. Nếu gặp lỗi <strong>HTTP 429</strong> (quá hạn mức), đợi vài phút hoặc đổi sang model <code>gemini-2.5-flash-lite</code> (hạn mức cao hơn).</li>
           </ol>
         </details>
       </div>
@@ -1189,10 +1297,41 @@ nếu Rubric không nêu, dùng thang 10.
     const uploadedFiles = { assignment: null, rubric: null, answerKey: null, exampleEssays: [], knowledgeBase: [], studentEssay: null };
     let lastGradeContext = null; // { assignmentName, studentEssayName, studentEssayContent, aiResult }
 
-    const savedKey = global.localStorage?.getItem(CONFIG.storageKeyApiKey);
-    const savedModel = global.localStorage?.getItem(CONFIG.storageKeyModel);
-    if (savedKey) wrapper.querySelector("#eg-apikey").value = savedKey;
-    if (savedModel) wrapper.querySelector("#eg-model").value = savedModel;
+    // ------------------------------------------------------------------
+    // Chọn Nhà cung cấp AI (Anthropic / Gemini) + Model tương ứng, mỗi
+    // provider có API key & model được nhớ riêng trong localStorage.
+    // ------------------------------------------------------------------
+    const providerSelect = wrapper.querySelector("#eg-provider");
+    const modelSelect = wrapper.querySelector("#eg-model");
+    const apikeyInput = wrapper.querySelector("#eg-apikey");
+    const apikeyLabel = wrapper.querySelector("#eg-apikey-label");
+    const helpAnthropic = wrapper.querySelector("#eg-help-anthropic");
+    const helpGemini = wrapper.querySelector("#eg-help-gemini");
+
+    const apiKeyStorageKey = (provider) => `${CONFIG.storageKeyApiKey}.${provider}`;
+    const modelStorageKey = (provider) => `${CONFIG.storageKeyModel}.${provider}`;
+
+    function populateModelSelect(provider) {
+      const conf = CONFIG.providers[provider];
+      modelSelect.innerHTML = conf.models.map((m) => `<option value="${m.value}">${escapeHtml(m.label)}</option>`).join("");
+      const savedModel = global.localStorage?.getItem(modelStorageKey(provider));
+      modelSelect.value = savedModel && conf.models.some((m) => m.value === savedModel) ? savedModel : conf.defaultModel;
+    }
+
+    function applyProviderUI(provider) {
+      const conf = CONFIG.providers[provider];
+      apikeyLabel.textContent = conf.keyLabel;
+      apikeyInput.placeholder = conf.keyPlaceholder;
+      populateModelSelect(provider);
+      apikeyInput.value = global.localStorage?.getItem(apiKeyStorageKey(provider)) || "";
+      helpAnthropic.style.display = provider === "anthropic" ? "" : "none";
+      helpGemini.style.display = provider === "gemini" ? "" : "none";
+    }
+
+    const savedProvider = global.localStorage?.getItem(CONFIG.storageKeyProvider) || CONFIG.defaultProvider;
+    providerSelect.value = CONFIG.providers[savedProvider] ? savedProvider : CONFIG.defaultProvider;
+    applyProviderUI(providerSelect.value);
+    providerSelect.addEventListener("change", () => applyProviderUI(providerSelect.value));
 
     wrapper.querySelectorAll('input[type="file"]').forEach((input) => {
       const targetId = input.dataset.target;
@@ -1244,22 +1383,34 @@ nếu Rubric không nêu, dùng thang 10.
     gradeBtn.addEventListener("click", async () => {
       clearError(wrapper);
       resultsWrap.classList.remove("eg-active");
-      const apiKey = wrapper.querySelector("#eg-apikey").value.trim();
-      const model = wrapper.querySelector("#eg-model").value;
+      const provider = CONFIG.providers[providerSelect.value] ? providerSelect.value : CONFIG.defaultProvider;
+      const providerConf = CONFIG.providers[provider];
+      const apiKeyRaw = apikeyInput.value;
+      const apiKey = sanitizeApiKey(apiKeyRaw);
+      const model = modelSelect.value;
       const editLevel = wrapper.querySelector("#eg-editlevel").value;
       const remember = wrapper.querySelector("#eg-remember").checked;
       const teacherInstructions = wrapper.querySelector("#eg-teacher-instructions").value.trim();
 
-      if (!apiKey) return showError(wrapper, "Vui lòng nhập Anthropic API key.");
+      if (!apiKey) return showError(wrapper, `Vui lòng nhập ${providerConf.keyLabel} hợp lệ (chuỗi ký tự, không dấu, không khoảng trắng).`);
       if (!uploadedFiles.rubric) return showError(wrapper, "Vui lòng upload file Rubric.");
       if (!uploadedFiles.studentEssay) return showError(wrapper, "Vui lòng upload bài làm của sinh viên.");
 
+      // Nếu key sau khi lọc khác với key gốc đã nhập, đồng bộ lại ô hiển thị để
+      // người dùng biết ký tự lạ đã được loại bỏ (tránh nhầm lẫn lần chấm sau).
+      if (apiKeyRaw !== apiKey) apikeyInput.value = apiKey;
+
       if (global.localStorage) {
-        if (remember) { global.localStorage.setItem(CONFIG.storageKeyApiKey, apiKey); global.localStorage.setItem(CONFIG.storageKeyModel, model); }
-        else global.localStorage.removeItem(CONFIG.storageKeyApiKey);
+        if (remember) {
+          global.localStorage.setItem(apiKeyStorageKey(provider), apiKey);
+          global.localStorage.setItem(modelStorageKey(provider), model);
+          global.localStorage.setItem(CONFIG.storageKeyProvider, provider);
+        } else {
+          global.localStorage.removeItem(apiKeyStorageKey(provider));
+        }
       }
 
-      const engine = new EssayGraderEngine({ apiKey, model });
+      const engine = new EssayGraderEngine({ apiKey, model, provider });
       gradeBtn.disabled = true;
       progressWrap.classList.add("eg-active");
 
