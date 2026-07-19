@@ -2583,7 +2583,7 @@ const ReviewUI = {
       <div class="card part-card">
         <div class="part-top"><span class="part-name" style="font-size:13px;">#${q.id}</span><span class="part-tag" style="background:rgba(239,68,68,.14);color:var(--danger-dark);">Sai ${BankManager.getWrong()[q.id]?.count||1} lần</span></div>
         <div style="font-size:13px; font-weight:600; line-height:1.4;">${Utils.escapeHtml(q.question)}</div>
-        <div class="part-meta"><span>Đáp án đúng: <b>${q.answer}</b></span></div>
+        <div class="part-meta"><span>Đáp án đúng: <b style="color:var(--success);">${q.answer}. ${Utils.escapeHtml(q.options[q.answer])}</b></span></div>
       </div>`).join('');
   },
   renderStarList(){
