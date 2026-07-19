@@ -218,14 +218,42 @@ nếu Rubric không nêu, dùng thang 10.
       reader.readAsArrayBuffer(file);
     });
   }
-  async function readPdf(file) {
-    if (!global.pdfjsLib) {
-      throw new Error(
-        `File "${file.name}" là PDF nhưng trang chưa nhúng pdf.js. Thêm ` +
-        `<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script> ` +
-        `trước thẻ script của essay-grader.js, hoặc dùng file .txt/.docx.`
-      );
+  // Tự động nạp thư viện đọc PDF/DOCX từ CDN nếu trang chưa có sẵn — người
+  // dùng không cần tự thêm thẻ <script> nào cả, upload file gì cũng chạy được.
+  function loadExternalScript(url) {
+    return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[src="${url}"]`)) { resolve(); return; }
+      const s = document.createElement("script");
+      s.src = url;
+      s.onload = () => resolve();
+      s.onerror = () => reject(new Error("Không tải được thư viện cần thiết từ CDN: " + url + " (kiểm tra kết nối mạng)."));
+      document.head.appendChild(s);
+    });
+  }
+  let pdfLibLoading = null;
+  async function ensurePdfLib() {
+    if (global.pdfjsLib) return;
+    if (!pdfLibLoading) {
+      pdfLibLoading = loadExternalScript("https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js").then(() => {
+        if (global.pdfjsLib?.GlobalWorkerOptions) {
+          global.pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js";
+        }
+      });
     }
+    return pdfLibLoading;
+  }
+  let mammothLibLoading = null;
+  async function ensureMammothLib() {
+    if (global.mammoth) return;
+    if (!mammothLibLoading) {
+      mammothLibLoading = loadExternalScript("https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.0/mammoth.browser.min.js");
+    }
+    return mammothLibLoading;
+  }
+
+  async function readPdf(file) {
+    await ensurePdfLib();
+    if (!global.pdfjsLib) throw new Error(`Không tải được thư viện đọc PDF cho file "${file.name}". Kiểm tra kết nối mạng rồi thử lại.`);
     const buffer = await readAsArrayBuffer(file);
     const pdf = await global.pdfjsLib.getDocument({ data: buffer }).promise;
     let text = "";
@@ -237,13 +265,8 @@ nếu Rubric không nêu, dùng thang 10.
     return text.trim();
   }
   async function readDocx(file) {
-    if (!global.mammoth) {
-      throw new Error(
-        `File "${file.name}" là DOCX nhưng trang chưa nhúng mammoth.js. Thêm ` +
-        `<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.0/mammoth.browser.min.js"></script> ` +
-        `trước thẻ script của essay-grader.js, hoặc dùng file .txt.`
-      );
-    }
+    await ensureMammothLib();
+    if (!global.mammoth) throw new Error(`Không tải được thư viện đọc DOCX cho file "${file.name}". Kiểm tra kết nối mạng rồi thử lại.`);
     const buffer = await readAsArrayBuffer(file);
     const result = await global.mammoth.extractRawText({ arrayBuffer: buffer });
     return result.value.trim();
@@ -253,7 +276,8 @@ nếu Rubric không nêu, dùng thang 10.
     if (TEXT_EXTENSIONS.includes(ext)) return readAsText(file);
     if (ext === "pdf") return readPdf(file);
     if (ext === "docx") return readDocx(file);
-    throw new Error(`Định dạng ".${ext}" (${file.name}) chưa được hỗ trợ đọc trực tiếp.`);
+    if (ext === "doc") throw new Error(`File "${file.name}" là định dạng .doc (Word cũ) — chưa hỗ trợ đọc trực tiếp. Hãy lưu lại dưới dạng .docx hoặc .txt rồi upload lại.`);
+    throw new Error(`Định dạng ".${ext}" (${file.name}) chưa được hỗ trợ đọc trực tiếp. Hỗ trợ: .txt .md .csv .json .html .pdf .docx`);
   }
   function computeStatistics(text) {
     const trimmed = (text || "").trim();
@@ -488,6 +512,12 @@ nếu Rubric không nêu, dùng thang 10.
     outline: none; border-color: var(--eg-accent); box-shadow: 0 0 0 3px rgba(20,120,212,.15);
   }
   #essay-grader-widget .eg-hint { font-size:11px; color: var(--eg-text-muted); margin-top:6px; }
+  #essay-grader-widget .eg-apikey-help { margin-top:10px; font-size:12px; border:1px solid var(--eg-card-border); border-radius: var(--eg-radius-sm); padding:8px 12px; background: rgba(20,120,212,.04); }
+  #essay-grader-widget .eg-apikey-help summary { cursor:pointer; font-weight:700; color: var(--eg-accent); list-style:none; display:flex; align-items:center; gap:6px; }
+  #essay-grader-widget .eg-apikey-help summary::-webkit-details-marker { display:none; }
+  #essay-grader-widget .eg-apikey-help ol { margin:10px 0 2px; padding-left:18px; color: var(--eg-text); line-height:1.7; }
+  #essay-grader-widget .eg-apikey-help a { color: var(--eg-accent); font-weight:700; }
+  #essay-grader-widget .eg-apikey-help code { background: rgba(20,120,212,.1); padding:1px 5px; border-radius:5px; font-size:11px; }
   #essay-grader-widget .eg-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(230px,1fr)); gap:14px; }
   #essay-grader-widget .eg-drop {
     border: 1.5px dashed var(--eg-card-border); border-radius: var(--eg-radius-sm);
@@ -843,6 +873,16 @@ nếu Rubric không nêu, dùng thang 10.
           </label>
           — key chỉ được gửi thẳng tới api.anthropic.com.
         </div>
+        <details class="eg-apikey-help">
+          <summary><i class="fa-solid fa-circle-question"></i> Chưa có API key? Xem cách lấy nhanh</summary>
+          <ol>
+            <li>Vào <a href="https://console.anthropic.com" target="_blank" rel="noopener">console.anthropic.com</a> → đăng nhập hoặc đăng ký (email/Google).</li>
+            <li>Vào <strong>Settings → API Keys</strong> → bấm <strong>Create Key</strong>, đặt tên rồi tạo.</li>
+            <li>Copy ngay chuỗi bắt đầu bằng <code>sk-ant-...</code> — chỉ hiện <strong>1 lần duy nhất</strong>.</li>
+            <li>Vào <strong>Billing</strong> thêm phương thức thanh toán (API tính phí theo token, không có gói miễn phí vĩnh viễn).</li>
+            <li>Dán key vừa tạo vào ô bên trên.</li>
+          </ol>
+        </details>
       </div>
 
       <div class="eg-card">
@@ -1060,14 +1100,21 @@ nếu Rubric không nêu, dùng thang 10.
 
     if (sidebarNav && mainContent) {
       if (!document.querySelector(`.nav-item[data-view="${VIEW_ID}"]`)) {
-        sidebarNav.insertAdjacentHTML(
-          "beforeend",
-          `<div class="nav-section-label">AI</div>
-           <button class="nav-item" data-view="${VIEW_ID}" id="eg-nav-item">
+        const navButtonHTML =
+          `<button class="nav-item" data-view="${VIEW_ID}" id="eg-nav-item">
              <i class="fa-solid fa-graduation-cap"></i> ${NAV_TITLE}
              <span class="badge" id="eg-nav-badge" style="display:none;">0</span>
-           </button>`
-        );
+           </button>`;
+        // Chèn vào CUỐI mục "Học tập" (sau nút cuối cùng của section đó) để
+        // tab này nằm chung nhóm với Danh sách phần / Làm bài / Ôn câu sai /
+        // Câu yêu thích, thay vì tự tạo 1 mục riêng ở cuối sidebar.
+        const lastLearningItem = document.querySelector('.nav-item[data-view="reviewStar"]')
+          || document.querySelector('.nav-item[data-view="quiz"]');
+        if (lastLearningItem) {
+          lastLearningItem.insertAdjacentHTML("afterend", navButtonHTML);
+        } else {
+          sidebarNav.insertAdjacentHTML("beforeend", navButtonHTML); // fallback nếu cấu trúc sidebar khác
+        }
       }
       const navBtn = document.getElementById("eg-nav-item");
 
