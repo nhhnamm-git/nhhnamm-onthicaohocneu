@@ -10,16 +10,16 @@
  *
  * NHẬN DIỆN ĐĂNG NHẬP / ADMIN (đã làm linh hoạt hơn)
  * ----------------------------------------------------------------------------
- * Nếu nút "Nộp bài" hoặc tab "Quản lý bài nộp" không hiện dù đã đăng nhập,
- * nguyên nhân gần như luôn là do module không nhận ra đúng cơ chế Auth của
- * trang. Hàm resolveAuthUser()/resolveIsAdmin() bên dưới đã thử lần lượt
- * nhiều kiểu phổ biến (AuthManager.currentUser, AuthManager.getCurrentUser(),
- * AuthManager.user, fbAuth.currentUser, firebase.auth().currentUser,
- * global.currentUser; và AuthManager.isAdmin(), AuthManager.role,
- * currentUser.role...). Nếu trang bạn dùng một biến/hàm khác hẳn, mở
- * Console gõ `typeof AuthManager` / `AuthManager` để xem cấu trúc thật, rồi
- * bổ sung đúng field đó vào 2 hàm này (module sẽ tự log cảnh báo ra Console
- * nếu sau ~15s vẫn không nhận diện được user).
+ * NGUYÊN NHÂN THƯỜNG GẶP NHẤT: trang khai báo `const fbDb = ...`,
+ * `const fbAuth = ...`, `const AuthManager = {...}` ở cấp cao nhất của 1
+ * thẻ <script> thường (không phải type="module"). Với const/let (khác var),
+ * biến KHÔNG tự trở thành thuộc tính của window — nên `window.fbDb`,
+ * `window.AuthManager` là undefined dù các biến này vẫn hoạt động bình
+ * thường. Module này đã tự dò thêm theo "biến trần" (bare identifier, đọc
+ * thẳng `fbDb`/`AuthManager` không qua window.) — cách này hoạt động được
+ * vì essay-grader.js cũng là 1 thẻ <script> thường, chạy SAU trong cùng
+ * trang nên vẫn nằm chung phạm vi khai báo top-level với các thẻ script
+ * trước đó.
  *
  * NHẬN DIỆN FIRESTORE DB (đã làm linh hoạt hơn)
  * ----------------------------------------------------------------------------
@@ -673,6 +673,14 @@ nếu Rubric không nêu, dùng thang 10.
   // đã init đúng. Các hàm dưới đây thử lần lượt vài kiểu phổ biến.
   function resolveDb() {
     if (global.fbDb && typeof global.fbDb.collection === "function") return global.fbDb;
+    // Trang dùng `const fbDb = firebase.firestore();` ở cấp cao nhất của 1
+    // thẻ <script> thường — biến này KHÔNG gắn vào window, nhưng vẫn đọc
+    // được trực tiếp (không qua window.) từ các thẻ <script> chạy sau đó
+    // trong cùng trang, kể cả essay-grader.js. `typeof x` không bao giờ
+    // ném lỗi kể cả khi x chưa từng được khai báo, nên an toàn để thử.
+    try {
+      if (typeof fbDb !== "undefined" && fbDb && typeof fbDb.collection === "function") return fbDb;
+    } catch (e) { /* bỏ qua */ }
     if (global.db && typeof global.db.collection === "function") return global.db;
     if (global.firestore && typeof global.firestore.collection === "function") return global.firestore;
     if (global.firebase && typeof global.firebase.firestore === "function") {
@@ -721,7 +729,15 @@ nếu Rubric không nêu, dùng thang 10.
   // LƯỢT nhiều kiểu cấu trúc AuthManager phổ biến, không đổi bất kỳ logic
   // nghiệp vụ nào khác trong file.
   function resolveAuthUser() {
-    const AM = global.AuthManager;
+    // Trang dùng `const AuthManager = {...}` / `const fbAuth = ...` ở cấp
+    // cao nhất của 1 thẻ <script> thường — không gắn vào window, nhưng đọc
+    // trực tiếp (bare identifier) từ essay-grader.js vẫn hoạt động vì cùng
+    // chạy trong 1 trang, thẻ script sau đọc được biến const/let của thẻ
+    // script trước đó.
+    let AM = global.AuthManager;
+    if (!AM) {
+      try { if (typeof AuthManager !== "undefined" && AuthManager) AM = AuthManager; } catch (e) { /* bỏ qua */ }
+    }
     if (AM) {
       if (AM.currentUser) return AM.currentUser;
       if (typeof AM.getCurrentUser === "function") {
@@ -732,6 +748,9 @@ nếu Rubric không nêu, dùng thang 10.
     }
     // Firebase Auth trực tiếp (không qua AuthManager) — vài trang gọi thẳng
     if (global.fbAuth && global.fbAuth.currentUser) return global.fbAuth.currentUser;
+    try {
+      if (typeof fbAuth !== "undefined" && fbAuth && fbAuth.currentUser) return fbAuth.currentUser;
+    } catch (e) { /* bỏ qua */ }
     if (global.firebase && typeof global.firebase.auth === "function") {
       try {
         const u = global.firebase.auth().currentUser;
@@ -748,7 +767,10 @@ nếu Rubric không nêu, dùng thang 10.
   }
 
   function resolveIsAdmin(user) {
-    const AM = global.AuthManager;
+    let AM = global.AuthManager;
+    if (!AM) {
+      try { if (typeof AuthManager !== "undefined" && AuthManager) AM = AuthManager; } catch (e) { /* bỏ qua */ }
+    }
     if (AM) {
       if (typeof AM.isAdmin === "function") {
         try { if (AM.isAdmin()) return true; } catch (e) { /* bỏ qua lỗi hàm isAdmin nếu có */ }
