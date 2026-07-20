@@ -33,9 +33,9 @@
       { id: 'cafef',       name: 'CafeF',                 rss: 'https://cafef.vn/home.rss',                               category: 'Kinh tế'    },
       { id: 'cafebiz',     name: 'CafeBiz',               rss: 'https://cafebiz.vn/rss/home.rss',                         category: 'Kinh doanh' },
       { id: 'vneconomy',   name: 'VnEconomy',             rss: 'https://vneconomy.vn/tin-moi.rss',                        category: 'Kinh tế'    },
-      { id: 'baodautu',    name: 'Báo Đầu Tư',            rss: 'https://baodautu.vn/rss/tin-moi-nhat.rss',                category: 'Đầu tư'     },
+      { id: 'baodautu',    name: 'Báo Đầu Tư',            rss: 'https://baodautu.vn/trang-chu.rss',                       category: 'Đầu tư'     },
       { id: 'saigontimes', name: 'The Saigon Times',      rss: 'https://thesaigontimes.vn/feed/',                         category: 'Kinh tế'    },
-      { id: 'vietstock',   name: 'Vietstock',             rss: 'https://vietstock.vn/rss/tin-moi.rss',                    category: 'Chứng khoán'},
+      { id: 'vietstock',   name: 'Vietstock',             rss: 'https://vietstock.vn/830/chung-khoan/co-phieu.rss',       category: 'Chứng khoán'},
       { id: 'vnfinance',   name: 'VietnamFinance',        rss: 'https://vietnamfinance.vn/rss/home.rss',                  category: 'Tài chính'  },
       { id: 'stockbiz',    name: 'Stockbiz',              rss: 'https://www.stockbiz.vn/rss.aspx',                        category: 'Chứng khoán'},
       { id: 'tnck',        name: 'Tin Nhanh Chứng Khoán', rss: 'https://www.tinnhanhchungkhoan.vn/rss/trang-chu.rss',     category: 'Chứng khoán'},
@@ -210,36 +210,83 @@
       const proxies = NewsConfig.RSS_PROXY_LIST;
       let lastError = null;
 
+      // ---- Bước 1: thử feed RSS GỐC của nguồn qua từng proxy ----
       for (const proxy of proxies) {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), NewsConfig.FETCH_TIMEOUT_MS);
         try {
-          const proxied = proxy.url + encodeURIComponent(source.rss);
-          const res = await fetch(proxied, { signal: controller.signal });
-          if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-          const text = await res.text();
-          const items = NewsAPI._parseByMode(text, proxy.mode);
-
+          const items = await NewsAPI._fetchViaProxy(source.rss, proxy);
           // Parse ra 0 bài dù response OK vẫn coi là nghi ngờ lỗi -> thử proxy khác,
-          // trừ khi đây là proxy cuối cùng thì chấp nhận trả về mảng rỗng.
-          if (items.length === 0 && proxy !== proxies[proxies.length - 1]) {
-            throw new Error('Không phân tích được bài viết nào (proxy có thể đã chặn)');
+          // trừ khi đây là proxy cuối cùng của bước 1 thì để bước 2 (fallback) xử lý tiếp.
+          if (items.length > 0) {
+            return items.map(it => NewsAPI._normalize(it, source));
           }
-
-          return items.map(it => NewsAPI._normalize(it, source));
+          lastError = new Error('Không phân tích được bài viết nào (proxy có thể đã chặn hoặc feed rỗng)');
         } catch (err) {
           lastError = err;
-          // Thử tiếp proxy kế tiếp trong danh sách, không dừng cả module.
-          continue;
-        } finally {
-          clearTimeout(timeoutId);
+          continue; // thử tiếp proxy kế tiếp
         }
       }
 
-      // Tất cả proxy đều lỗi -> báo nguồn này lỗi, nhưng KHÔNG làm crash các nguồn khác
-      // (Promise.allSettled ở fetchAll đã cô lập lỗi theo từng nguồn).
-      throw new Error(`[${source.name}] Tất cả RSS Proxy đều lỗi — ${(lastError && lastError.message) || 'không rõ nguyên nhân'}`);
+      // ---- Bước 2: FALLBACK — feed gốc lỗi ở mọi proxy (do RSS đổi đường dẫn,
+      // bị chặn bởi Cloudflare, DNS hỏng...) -> tự chuyển sang lấy tin CỦA CHÍNH
+      // nguồn này qua Google News RSS (ổn định hơn nhiều, hiếm khi bị chặn), lọc
+      // theo site:domain để chỉ nhận bài từ đúng tờ báo đó. ----
+      try {
+        const domain = new URL(source.rss).hostname.replace(/^www\./, '');
+        const gnUrl = `https://news.google.com/rss/search?q=site:${domain}&hl=vi-VN&gl=VN&ceid=VN:vi`;
+        for (const proxy of proxies) {
+          try {
+            const items = await NewsAPI._fetchViaProxy(gnUrl, proxy, 'xml', 8000);
+            if (items.length > 0) {
+              return items
+                .map(it => NewsAPI._cleanGoogleNewsItem(it, source))
+                .map(it => NewsAPI._normalize(it, source));
+            }
+          } catch (err) {
+            lastError = err;
+            continue;
+          }
+        }
+      } catch (e) {
+        // domain không hợp lệ -> bỏ qua fallback, rơi xuống báo lỗi bên dưới
+      }
+
+      // Tất cả proxy VÀ fallback đều lỗi -> báo nguồn này lỗi, nhưng KHÔNG làm
+      // crash các nguồn khác (Promise.allSettled ở fetchAll đã cô lập lỗi theo từng nguồn).
+      throw new Error(`[${source.name}] Tất cả RSS Proxy (và fallback Google News) đều lỗi — ${(lastError && lastError.message) || 'không rõ nguyên nhân'}`);
+    }
+
+    /**
+     * Chuẩn hoá riêng cho item lấy từ Google News fallback:
+     * - Bỏ hậu tố " - Tên báo" mà Google tự thêm vào cuối tiêu đề.
+     * - Nếu description có link gốc (thẻ <a href>) thì dùng link đó thay vì
+     *   link redirect news.google.com để người đọc vào thẳng bài gốc.
+     */
+    static _cleanGoogleNewsItem(raw, source) {
+      let title = (raw.title || '').trim();
+      const suffixIdx = title.lastIndexOf(' - ');
+      if (suffixIdx > 0 && title.length - suffixIdx < 60) {
+        title = title.slice(0, suffixIdx).trim();
+      }
+      let link = raw.link;
+      const desc = raw.rawDescription || '';
+      const m = desc.match(/<a[^>]+href=["']([^"']+)["']/i);
+      if (m && m[1]) link = m[1];
+      return Object.assign({}, raw, { title, link });
+    }
+
+    /** Gọi 1 proxy cho 1 URL feed cụ thể, có timeout riêng, trả về mảng item thô (chưa normalize). */
+    static async _fetchViaProxy(feedUrl, proxy, forceMode, timeoutMs) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs || NewsConfig.FETCH_TIMEOUT_MS);
+      try {
+        const proxied = proxy.url + encodeURIComponent(feedUrl);
+        const res = await fetch(proxied, { signal: controller.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const text = await res.text();
+        return NewsAPI._parseByMode(text, forceMode || proxy.mode);
+      } finally {
+        clearTimeout(timeoutId);
+      }
     }
 
     /** Phân giải nội dung trả về theo mode của proxy ('xml' | 'json' | 'auto'). */
