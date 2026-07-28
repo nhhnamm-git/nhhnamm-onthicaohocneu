@@ -1,7 +1,16 @@
 // ==========================================================================
 // KHỈ AI CHATBOT WIDGET - FILE GỘP HOÀN CHỈNH
-// Tích hợp 100% UI Khỉ Robot và Logic API Groq (Đã fix lỗi dấu * và câu chúc)
-// Đã đồng bộ giao diện sáng/tối theo hệ thống (data-theme="dark")
+// Tích hợp 100% UI Khỉ Robot và Logic API Google Gemini (gói MIỄN PHÍ)
+// (Đã fix lỗi dấu * và câu chúc) — Đã đồng bộ giao diện sáng/tối theo hệ
+// thống (data-theme="dark")
+//
+// CÁCH LẤY API KEY GEMINI (MIỄN PHÍ, không cần thẻ thanh toán):
+// 1. Vào https://aistudio.google.com/app/apikey, đăng nhập bằng tài khoản Google.
+// 2. Bấm "Create API key" (nếu chưa có project, để hệ thống tự tạo miễn phí).
+// 3. Copy chuỗi bắt đầu bằng "AIza..." rồi dán vào GEMINI_API_KEY bên dưới.
+// 4. Gói miễn phí có giới hạn số lượt gọi/phút và /ngày. Nếu gặp lỗi HTTP 429
+//    (quá hạn mức), đợi vài phút hoặc đổi GEMINI_MODEL sang "gemini-3.5-flash-lite"
+//    (model nhanh nhất, hạn mức cao nhất trong gói free).
 // ==========================================================================
 
 (function initKhiAIChatbot() {
@@ -253,11 +262,18 @@
 
   document.body.insertAdjacentHTML('beforeend', chatbotUI);
 
-  // 2. LOGIC XỬ LÝ API GROQ VÀ UI CHATBOT
-  // => Dán API Key Groq thật của bạn vào chuỗi bên dưới (lấy tại https://console.groq.com/keys).
-  const GROQ_API_KEY = "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";
-  // Model Groq đang dùng. Muốn đổi model sau này chỉ cần sửa đúng dòng này.
-  const GROQ_MODEL = "llama-3.3-70b-versatile";
+  // 2. LOGIC XỬ LÝ API GOOGLE GEMINI (MIỄN PHÍ) VÀ UI CHATBOT
+  // => Dán API Key Gemini thật của bạn vào chuỗi bên dưới
+  //    (lấy miễn phí tại https://aistudio.google.com/app/apikey).
+  const GEMINI_API_KEY = "AQ.Ab8RN6I9gTWVSjpyIO04OrHeB_5aEYFo7Mdf60vXSFmSj6ty2g";
+  // Model Gemini đang dùng (nằm trong gói miễn phí). Muốn đổi model sau này
+  // chỉ cần sửa đúng dòng này — ví dụ "gemini-3.5-flash-lite" (nhanh nhất,
+  // hạn mức miễn phí cao nhất) hoặc "gemini-3.6-flash" (mạnh hơn, hạn mức thấp hơn).
+  const GEMINI_MODEL = "gemini-3.5-flash-lite";
+  // Endpoint gốc của Gemini API (dùng chung cho mọi model ở trên).
+  const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
+  // System instruction — giữ nguyên nội dung yêu cầu cũ (không dùng dấu *, không tự chúc).
+  const GEMINI_SYSTEM_PROMPT = "Bạn là một trợ lý ảo hỗ trợ ôn thi. Trả lời ngắn gọn, chính xác bằng tiếng Việt. Tuyệt đối KHÔNG dùng ký tự * (dấu sao) hay định dạng markdown trong câu trả lời. Không tự tạo lời chào kết thúc vì hệ thống sẽ làm việc đó.";
 
   const widgetContainer = document.getElementById('ai-widget-container');
   const chatWindow = document.getElementById('bot-chat-window');
@@ -316,22 +332,20 @@
 
   const scrollToBottom = () => { chatBody.scrollTop = chatBody.scrollHeight; };
 
-  // --- Logic gọi API AI (Groq) ---
-  async function callGroq(model, q) {
-    const res = await fetch(`https://api.groq.com/openai/v1/chat/completions`, {
+  // --- Logic gọi API AI (Google Gemini) ---
+  async function callGemini(model, q) {
+    const url = `${GEMINI_ENDPOINT}/${encodeURIComponent(model)}:generateContent`;
+    const res = await fetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${GROQ_API_KEY}`
+        "x-goog-api-key": GEMINI_API_KEY
       },
       body: JSON.stringify({
-        model: model,
-        messages: [
-          // Giữ nguyên System Instruction để yêu cầu không sử dụng *
-          { role: "system", content: "Bạn là một trợ lý ảo hỗ trợ ôn thi. Trả lời ngắn gọn, chính xác bằng tiếng Việt. Tuyệt đối KHÔNG dùng ký tự * (dấu sao) hay định dạng markdown trong câu trả lời. Không tự tạo lời chào kết thúc vì hệ thống sẽ làm việc đó." },
-          { role: "user", content: q }
-        ],
-        temperature: 0.5
+        // Giữ nguyên System Instruction để yêu cầu không sử dụng *
+        system_instruction: { parts: [{ text: GEMINI_SYSTEM_PROMPT }] },
+        contents: [{ role: "user", parts: [{ text: q }] }],
+        generationConfig: { temperature: 0.5 }
       })
     });
     const data = await res.json();
@@ -345,12 +359,17 @@
     let lastErrorMsg = "Lỗi không xác định từ máy chủ.";
 
     try {
-      const { ok, status, data } = await callGroq(GROQ_MODEL, q);
+      const { ok, status, data } = await callGemini(GEMINI_MODEL, q);
 
-      if (ok && data.choices && data.choices[0]?.message?.content) {
+      // Gemini trả nội dung trong data.candidates[0].content.parts[].text
+      const candidate = data?.candidates?.[0];
+      const parts = candidate?.content?.parts || [];
+      const rawText = parts.map(p => p.text || '').join('');
+
+      if (ok && rawText) {
         typingIndicator.style.display = 'none';
 
-        let botResponse = data.choices[0].message.content;
+        let botResponse = rawText;
 
         // 1. Loại bỏ toàn bộ các dấu sao (*)
         botResponse = botResponse.replace(/\*/g, '');
@@ -366,20 +385,26 @@
       }
 
       if (!ok) {
-        console.error(`Lỗi từ model ${GROQ_MODEL} (HTTP ${status}):`, data);
+        console.error(`Lỗi từ model ${GEMINI_MODEL} (HTTP ${status}):`, data);
         lastErrorMsg = data.error?.message || lastErrorMsg;
+        if (status === 429) lastErrorMsg += ' (Đã vượt hạn mức miễn phí — đợi vài phút hoặc đổi sang model gemini-3.5-flash-lite.)';
+        if (status === 401 || status === 403) lastErrorMsg = 'API key Gemini không hợp lệ hoặc chưa được dán đúng. Kiểm tra lại GEMINI_API_KEY trong file chatbot.js.';
 
         typingIndicator.style.display = 'none';
         addMessage(`⚠️ Lỗi kết nối: ${lastErrorMsg}`, 'bot');
         return;
       }
 
+      // Không có ok=false nhưng cũng không có text — có thể bị chặn an toàn nội dung
+      const blockReason = data?.promptFeedback?.blockReason;
       typingIndicator.style.display = 'none';
-      addMessage("Không nhận được câu trả lời hợp lệ từ AI.", 'bot');
+      addMessage(blockReason
+        ? `Gemini từ chối trả lời vì lý do an toàn nội dung (${blockReason}).`
+        : "Không nhận được câu trả lời hợp lệ từ AI.", 'bot');
       return;
 
     } catch (e) {
-      console.error(`Lỗi mạng khi gọi model ${GROQ_MODEL}:`, e);
+      console.error(`Lỗi mạng khi gọi model ${GEMINI_MODEL}:`, e);
       lastErrorMsg = "Lỗi mạng, không thể kết nối tới máy chủ AI.";
 
       typingIndicator.style.display = 'none';
