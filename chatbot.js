@@ -265,7 +265,7 @@
   // 2. LOGIC XỬ LÝ API GOOGLE GEMINI (MIỄN PHÍ) VÀ UI CHATBOT
   // => Dán API Key Gemini thật của bạn vào chuỗi bên dưới
   //    (lấy miễn phí tại https://aistudio.google.com/app/apikey).
-  const GEMINI_API_KEY = "AQ.Ab8RN6I9gTWVSjpyIO04OrHeB_5aEYFo7Mdf60vXSFmSj6ty2g";
+  const GEMINI_API_KEY = "AQ.Ab8RN6KHut-O73NxaX-UHqRSwHz2JR93tswydja9jStEm4-62g";
   // Model Gemini đang dùng (nằm trong gói miễn phí). Muốn đổi model sau này
   // chỉ cần sửa đúng dòng này — ví dụ "gemini-3.5-flash-lite" (nhanh nhất,
   // hạn mức miễn phí cao nhất) hoặc "gemini-3.6-flash" (mạnh hơn, hạn mức thấp hơn).
