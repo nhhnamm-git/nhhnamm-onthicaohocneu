@@ -360,11 +360,16 @@
 
     // Kiểm tra nhanh trước khi gọi API: bắt các lỗi dán key sai thường gặp
     // (còn sót chữ mẫu, key rỗng, dính khoảng trắng...) để báo ngay, không
-    // cần chờ gọi API rồi mới biết.
+    // cần chờ gọi API rồi mới biết. LƯU Ý: từ giữa năm 2026 Google phát hành
+    // 2 dạng key cho Gemini API: dạng cũ "AIza..." và dạng mới "AQ...." (Auth
+    // key) — cả 2 đều hợp lệ, nên KHÔNG được ép buộc key phải bắt đầu bằng
+    // "AIza" (làm vậy sẽ chặn nhầm key AQ. hợp lệ của người dùng mới).
     const trimmedKey = (GEMINI_API_KEY || '').trim();
-    if (!trimmedKey || trimmedKey.includes('DÁN_API_KEY') || !trimmedKey.startsWith('AIza')) {
+    const looksLikePlaceholder = !trimmedKey || trimmedKey.includes('DÁN_API_KEY');
+    const looksLikeValidFormat = /^(AIza|AQ\.)/.test(trimmedKey);
+    if (looksLikePlaceholder || !looksLikeValidFormat) {
       typingIndicator.style.display = 'none';
-      addMessage('⚠️ GEMINI_API_KEY trong file chatbot.js chưa hợp lệ (còn trống, còn chữ mẫu, hoặc không đúng định dạng "AIza..."). Hãy mở file chatbot.js, xoá sạch giá trị cũ và dán đúng key thật lấy tại aistudio.google.com/app/apikey vào giữa 2 dấu ngoặc kép.', 'bot');
+      addMessage('⚠️ GEMINI_API_KEY trong file chatbot.js chưa hợp lệ (còn trống, còn chữ mẫu, hoặc không đúng định dạng — key Gemini hợp lệ bắt đầu bằng "AIza" hoặc "AQ."). Hãy mở file chatbot.js, xoá sạch giá trị cũ và dán đúng key thật lấy tại aistudio.google.com/app/apikey vào giữa 2 dấu ngoặc kép.', 'bot');
       return;
     }
 
@@ -398,7 +403,10 @@
         console.error(`Lỗi từ model ${GEMINI_MODEL} (HTTP ${status}):`, data);
         lastErrorMsg = data.error?.message || lastErrorMsg;
         if (status === 429) lastErrorMsg += ' (Đã vượt hạn mức miễn phí — đợi vài phút hoặc đổi sang model gemini-3.5-flash-lite.)';
-        if (status === 401 || status === 403) {
+        const errReason = data?.error?.status || '';
+        if (errReason === 'ACCESS_TOKEN_TYPE_UNSUPPORTED') {
+          lastErrorMsg = `Google từ chối key với lỗi "ACCESS_TOKEN_TYPE_UNSUPPORTED". Đây KHÔNG phải lỗi trong file chatbot.js — đây là sự cố đang xảy ra ở phía Google với các API key mới dạng "AQ." (nhiều người dùng khác cũng đang gặp, ghi nhận trên diễn đàn Google AI Developers). Cách xử lý: (1) thử tạo lại key mới ở aistudio.google.com/app/apikey xem có ra key dạng "AIza..." không, (2) nếu vẫn chỉ ra key "AQ.", tạm thời chưa có cách khắc phục từ phía người dùng — cần chờ Google sửa, hoặc theo dõi thông báo tại discuss.ai.google.dev.`;
+        } else if (status === 401 || status === 403) {
           lastErrorMsg = `API key Gemini không hợp lệ hoặc chưa đủ quyền (HTTP ${status}). Chi tiết từ Google: "${data.error?.message || '(không có)'}". Kiểm tra: (1) đã xoá hết chữ mẫu placeholder trong GEMINI_API_KEY chưa, (2) key có dính khoảng trắng/xuống dòng khi copy không, (3) project của key đã bật "Generative Language API" chưa, (4) key có bị giới hạn API trong Google Cloud Console không.`;
         }
 
