@@ -125,11 +125,11 @@
         endpoint: "https://generativelanguage.googleapis.com/v1beta/models",
         keyLabel: "Google Gemini API Key",
         keyPlaceholder: "AIza...",
-        defaultModel: "gemini-3.5-flash",
+        defaultModel: "gemini-3.6-flash",
         models: [
-          { value: "gemini-3.5-flash", label: "gemini-3.5-flash (khuyên dùng)" },
-          { value: "gemini-3.1-flash-lite", label: "gemini-3.1-flash-lite (nhanh nhất, hạn mức cao hơn)" },
-          { value: "gemini-3.1-pro", label: "gemini-3.1-pro (mạnh nhất, hạn mức thấp)" },
+          { value: "gemini-3.6-flash", label: "gemini-3.6-flash (khuyên dùng, mới nhất)" },
+          { value: "gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite (nhanh nhất, hạn mức cao hơn)" },
+          { value: "gemini-3.1-pro-preview", label: "gemini-3.1-pro-preview (mạnh nhất, hạn mức thấp)" },
         ],
       },
     },
@@ -518,7 +518,7 @@ nếu Rubric không nêu, dùng thang 10.
       // --- Hết credit / chưa bật thanh toán ---
       if (lowerMsg.includes("credit balance") || lowerMsg.includes("purchase credit") || lowerMsg.includes("insufficient")) {
         return provider === "gemini"
-          ? `Tài khoản Google chưa đủ hạn mức/thanh toán cho model trả phí này. Vào Google AI Studio → Billing để kiểm tra, hoặc đổi sang model có hạn mức miễn phí cao hơn (gemini-3.1-flash-lite).${rawMessage ? ` (Chi tiết từ Google: "${rawMessage}")` : ""}`
+          ? `Tài khoản Google chưa đủ hạn mức/thanh toán cho model trả phí này. Vào Google AI Studio → Billing để kiểm tra, hoặc đổi sang model có hạn mức miễn phí cao hơn (gemini-3.5-flash-lite).${rawMessage ? ` (Chi tiết từ Google: "${rawMessage}")` : ""}`
           : `Tài khoản Anthropic đã HẾT CREDIT (số dư quá thấp để gọi API). Vào console.anthropic.com → mục "Plans & Billing" để nạp thêm credit hoặc nâng cấp gói, sau đó chấm lại bài. Nếu chỉ mới nạp tiền, đợi 1-2 phút để hệ thống cập nhật số dư.${rawMessage ? ` (Chi tiết từ Anthropic: "${rawMessage}")` : ""}`;
       }
 
@@ -547,7 +547,7 @@ nếu Rubric không nêu, dùng thang 10.
       // --- Vượt hạn mức / gọi quá nhanh ---
       if (status === 429 || errType === "rate_limit_error" || errType === "RESOURCE_EXHAUSTED") {
         return provider === "gemini"
-          ? "Đã vượt hạn mức miễn phí (số lượt gọi/phút hoặc /ngày của Gemini). Đợi vài phút rồi thử lại, hoặc đổi sang model gemini-3.1-flash-lite (hạn mức cao hơn)."
+          ? "Đã vượt hạn mức miễn phí (số lượt gọi/phút hoặc /ngày của Gemini). Đợi vài phút rồi thử lại, hoặc đổi sang model gemini-3.5-flash-lite (hạn mức cao hơn)."
           : "Đã vượt rate limit của tài khoản Anthropic (gọi quá nhanh/quá nhiều trong thời gian ngắn, hoặc gói đang ở mức thấp). Đợi khoảng 1 phút rồi thử chấm lại.";
       }
 
@@ -1340,7 +1340,7 @@ nếu Rubric không nêu, dùng thang 10.
             <li>Bấm <strong>Create API key</strong> → chọn hoặc để hệ thống tự tạo một Google Cloud project (miễn phí, <strong>không cần thẻ thanh toán</strong>).</li>
             <li>Copy chuỗi bắt đầu bằng <code>AIza...</code>.</li>
             <li>Dán vào ô "API Key" bên trên, đảm bảo Nhà cung cấp AI đang chọn là <strong>Google Gemini</strong>.</li>
-            <li>Gói miễn phí có giới hạn số lượt gọi/phút và /ngày tuỳ model. Nếu gặp lỗi <strong>HTTP 429</strong> (quá hạn mức), đợi vài phút hoặc đổi sang model <code>gemini-3.1-flash-lite</code> (hạn mức cao hơn). Danh sách model có thể thay đổi theo thời gian — nếu model nào báo lỗi "not found", hãy kiểm tra tên model mới nhất tại <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Google AI Studio</a> (mục chọn model khi chat thử) rồi báo lại để cập nhật danh sách trong ứng dụng.</li>
+            <li>Gói miễn phí có giới hạn số lượt gọi/phút và /ngày tuỳ model. Nếu gặp lỗi <strong>HTTP 429</strong> (quá hạn mức), đợi vài phút hoặc đổi sang model <code>gemini-3.5-flash-lite</code> (hạn mức cao hơn). Danh sách model có thể thay đổi theo thời gian — nếu model nào báo lỗi "not found", hãy kiểm tra tên model mới nhất tại <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener">Google AI Studio</a> (mục chọn model khi chat thử) rồi báo lại để cập nhật danh sách trong ứng dụng.</li>
           </ol>
         </details>
       </div>
