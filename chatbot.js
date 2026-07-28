@@ -358,6 +358,16 @@
 
     let lastErrorMsg = "Lỗi không xác định từ máy chủ.";
 
+    // Kiểm tra nhanh trước khi gọi API: bắt các lỗi dán key sai thường gặp
+    // (còn sót chữ mẫu, key rỗng, dính khoảng trắng...) để báo ngay, không
+    // cần chờ gọi API rồi mới biết.
+    const trimmedKey = (GEMINI_API_KEY || '').trim();
+    if (!trimmedKey || trimmedKey.includes('DÁN_API_KEY') || !trimmedKey.startsWith('AIza')) {
+      typingIndicator.style.display = 'none';
+      addMessage('⚠️ GEMINI_API_KEY trong file chatbot.js chưa hợp lệ (còn trống, còn chữ mẫu, hoặc không đúng định dạng "AIza..."). Hãy mở file chatbot.js, xoá sạch giá trị cũ và dán đúng key thật lấy tại aistudio.google.com/app/apikey vào giữa 2 dấu ngoặc kép.', 'bot');
+      return;
+    }
+
     try {
       const { ok, status, data } = await callGemini(GEMINI_MODEL, q);
 
@@ -388,7 +398,9 @@
         console.error(`Lỗi từ model ${GEMINI_MODEL} (HTTP ${status}):`, data);
         lastErrorMsg = data.error?.message || lastErrorMsg;
         if (status === 429) lastErrorMsg += ' (Đã vượt hạn mức miễn phí — đợi vài phút hoặc đổi sang model gemini-3.5-flash-lite.)';
-        if (status === 401 || status === 403) lastErrorMsg = 'API key Gemini không hợp lệ hoặc chưa được dán đúng. Kiểm tra lại GEMINI_API_KEY trong file chatbot.js.';
+        if (status === 401 || status === 403) {
+          lastErrorMsg = `API key Gemini không hợp lệ hoặc chưa đủ quyền (HTTP ${status}). Chi tiết từ Google: "${data.error?.message || '(không có)'}". Kiểm tra: (1) đã xoá hết chữ mẫu placeholder trong GEMINI_API_KEY chưa, (2) key có dính khoảng trắng/xuống dòng khi copy không, (3) project của key đã bật "Generative Language API" chưa, (4) key có bị giới hạn API trong Google Cloud Console không.`;
+        }
 
         typingIndicator.style.display = 'none';
         addMessage(`⚠️ Lỗi kết nối: ${lastErrorMsg}`, 'bot');
