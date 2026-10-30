@@ -24,69 +24,12 @@
    tuyến, tìm kiếm người/bài/#hashtag, hồ sơ + EXP + cấp + huy hiệu, bảng xếp
    hạng, xu hướng, quản trị (xoá bài, khoá tài khoản, xử lý báo cáo).
 
-   ‼️ BẮT BUỘC: dán đoạn RULES dưới đây vào Firebase Console > Firestore > Rules
-      (gộp vào khối `match /databases/{database}/documents { ... }` hiện có):
-
-   function signedIn(){ return request.auth != null; }
-   function isAdm(){ return signedIn() &&
-     get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'; }
-   match /social_profiles/{u} {
-     allow read: if signedIn();
-     allow create, update: if signedIn() && (request.auth.uid == u || isAdm());
-   }
-   match /social_posts/{id} {
-     allow read: if signedIn();
-     allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
-     allow update: if signedIn() && (resource.data.uid == request.auth.uid || isAdm() ||
-       request.resource.data.diff(resource.data).affectedKeys()
-         .hasOnly(['reactions','pollVotes','commentCount','shareCount']));
-     allow delete: if signedIn() && (resource.data.uid == request.auth.uid || isAdm());
-   }
-   match /social_comments/{id} {
-     allow read: if signedIn();
-     allow create: if signedIn() && request.resource.data.uid == request.auth.uid;
-     allow update: if signedIn() && (resource.data.uid == request.auth.uid || isAdm() ||
-       request.resource.data.diff(resource.data).affectedKeys().hasOnly(['reactions']));
-     allow delete: if signedIn() && (resource.data.uid == request.auth.uid || isAdm());
-   }
-   match /social_friends/{id} {
-     allow read, create, update, delete: if signedIn() && request.auth.uid in resource.data.members
-       || signedIn() && request.auth.uid in request.resource.data.members;
-   }
-   match /social_follow/{id} {
-     allow read: if signedIn();
-     allow create, delete: if signedIn();
-   }
-   match /social_notifications/{id} {
-     allow create: if signedIn();
-     allow read, update, delete: if signedIn() && resource.data.uid == request.auth.uid;
-   }
-   match /social_conversations/{id} {
-     allow read, write: if signedIn() && (request.auth.uid in resource.data.members ||
-       request.auth.uid in request.resource.data.members);
-     match /messages/{m} {
-       allow read, create: if signedIn() &&
-         request.auth.uid in get(/databases/$(database)/documents/social_conversations/$(id)).data.members;
-     }
-   }
-   match /social_global_chat/{m} {
-     allow read: if signedIn();
-     allow create: if signedIn() && request.resource.data.from == request.auth.uid;
-     allow delete: if isAdm();
-   }
-   match /social_groups/{g} {
-     allow read, create, update: if signedIn();
-     allow delete: if signedIn() && (resource.data.createdBy == request.auth.uid || isAdm());
-     match /messages/{m} { allow read, create: if signedIn(); allow delete: if isAdm(); }
-   }
-   match /social_reports/{r} {
-     allow create: if signedIn();
-     allow read, update, delete: if isAdm();
-   }
-   match /social_presence/{u} {
-     allow read: if signedIn();
-     allow write: if signedIn() && request.auth.uid == u;
-   }
+   ‼️ BẮT BUỘC: publish file Firestore Rules đi kèm (firestore.rules) trong
+      Firebase Console > Firestore Database > Rules. Rules đã viết khớp từng
+      collection/query của file này: social_profiles, social_posts, social_comments,
+      social_friends, social_follow, social_notifications, social_conversations
+      (+ messages), social_global_chat, social_groups (+ messages), social_reports,
+      social_presence. Nếu thiếu/sai, giao diện hiện banner đỏ.
    ========================================================================== */
 (function () {
   'use strict';
@@ -1129,7 +1072,7 @@
     },
     showBanner() {
       const b = $('#socBanner'); if (!b) return;
-      b.innerHTML = State.permError ? `<div class="soc-banner"><b><i class="fa-solid fa-triangle-exclamation"></i> Firestore từ chối quyền truy cập.</b> Hãy thêm Rules cho các collection <code>social_*</code> (xem đoạn RULES ở đầu file social.js) rồi bấm "Publish" trong Firebase Console, sau đó tải lại trang.</div>` : '';
+      b.innerHTML = State.permError ? `<div class="soc-banner"><b><i class="fa-solid fa-triangle-exclamation"></i> Firestore từ chối quyền truy cập.</b> Hãy publish file <code>firestore.rules</code> mới (phần social_* phải khớp với social.js v2) trong Firebase Console > Firestore > Rules trong Firebase Console, sau đó tải lại trang.</div>` : '';
     },
     searchTag(tag) { State.pendingSearch = '#' + tag; this.setTab('feed'); },
     setTab(t) { State.tab = t; $$('#socMenu .soc-mi').forEach(b => b.classList.toggle('on', b.dataset.t === t)); this.renderTab(); },
