@@ -1,146 +1,326 @@
+
 /* ============================================================================
-   click-fx.js — Hiệu ứng click "vệt sáng xanh dương, kiểu chuyển đổi số"
-   ----------------------------------------------------------------------------
-   CÁCH DÙNG (chỉ 1 dòng, đặt cuối <body> trong index.html):
-       <script src="click-fx.js"></script>
+   click-fx.js — PREMIUM DIGITAL CLICK EFFECT
+   Style: Apple-like / Fintech / Modern SaaS
+   Usage: <script src="click-fx.js"></script>
+   ============================================================================ */
 
-   - Không cần sửa bất kỳ file/CSS nào khác. File tự tạo 1 lớp canvas trong suốt
-     phủ toàn trang (pointer-events:none nên KHÔNG chặn click, KHÔNG ảnh hưởng
-     layout), nghe sự kiện ở cấp document nên áp dụng cho mọi trang/mọi phần tử,
-     kể cả phần tử tạo động sau này (modal, tab Thảo luận, ...).
-   - Hiệu ứng: tia sáng toả ra + vòng xung + vòng nét đứt xoay + đường mạch điện
-     (trục ngang/dọc kết thúc bằng nút vuông) + hạt pixel, màu xanh dương/cyan.
-   - Tự tắt khi người dùng bật "giảm chuyển động" của hệ điều hành.
-   - Canvas chỉ chạy khi có hiệu ứng đang phát; xong là dừng, không tốn CPU.
-
-   TUỲ CHỈNH nhanh:  window.ClickFX.disable() / .enable() / .setColors(a, b)
-   ========================================================================== */
 (function () {
   'use strict';
+
   if (window.ClickFX) return;
 
-  var cfg = {
+  const CONFIG = {
     enabled: true,
-    c1: [20, 120, 212],   // xanh dương chính  (#1478d4)
-    c2: [34, 211, 238],   // cyan nhấn         (#22d3ee)
-    life: 760,            // ms
-    max: 24               // tối đa số vụ nổ cùng lúc
+
+    // Premium blue palette
+    primary: [59, 130, 246],
+    secondary: [34, 211, 238],
+    white: [219, 242, 255],
+
+    duration: 580,
+    maxEffects: 18,
+    maxDPR: 2
   };
-  var reduce = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
-  var cv, cx, dpr = 1, W = 0, H = 0, bursts = [], raf = 0;
 
-  var rgba = function (c, a) { return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')'; };
-  var easeOut = function (t) { return 1 - Math.pow(1 - t, 3); };
-  var rnd = function (a, b) { return a + Math.random() * (b - a); };
+  const reducedMotion = window.matchMedia &&
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  function ensureCanvas() {
-    if (cv) return;
-    cv = document.createElement('canvas');
-    cv.setAttribute('aria-hidden', 'true');
-    cv.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:2147483000;';
-    (document.body || document.documentElement).appendChild(cv);
-    cx = cv.getContext('2d');
+  let canvas = null;
+  let ctx = null;
+  let width = 0;
+  let height = 0;
+  let dpr = 1;
+  let animation = 0;
+
+  const effects = [];
+
+  const rgba = (color, alpha) =>
+    `rgba(${color[0]},${color[1]},${color[2]},${alpha})`;
+
+  const random = (min, max) =>
+    min + Math.random() * (max - min);
+
+  const ease = t => 1 - Math.pow(1 - t, 4);
+
+  // --------------------------------------------------------------------------
+  // CANVAS
+  // --------------------------------------------------------------------------
+
+  function initCanvas() {
+    if (canvas) return;
+
+    canvas = document.createElement('canvas');
+    canvas.setAttribute('aria-hidden', 'true');
+
+    canvas.style.cssText = `
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 2147483000;
+      overflow: hidden;
+    `;
+
+    (document.body || document.documentElement)
+      .appendChild(canvas);
+
+    ctx = canvas.getContext('2d', { alpha: true });
+
     resize();
-    window.addEventListener('resize', resize, { passive: true });
+
+    window.addEventListener('resize', resize, {
+      passive: true
+    });
   }
+
   function resize() {
-    if (!cv) return;
-    dpr = Math.min(window.devicePixelRatio || 1, 2);
-    W = window.innerWidth; H = window.innerHeight;
-    cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr);
-    cx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (!canvas) return;
+
+    dpr = Math.min(
+      window.devicePixelRatio || 1,
+      CONFIG.maxDPR
+    );
+
+    width = window.innerWidth;
+    height = window.innerHeight;
+
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
-  function spawn(x, y) {
-    var b = { x: x, y: y, t0: performance.now(), rays: [], pix: [], rot: rnd(0, Math.PI) };
-    var n = 12, i, a;
-    for (i = 0; i < n; i++) {                       // tia sáng toả đều + lệch ngẫu nhiên
-      a = (i / n) * Math.PI * 2 + rnd(-0.18, 0.18);
-      b.rays.push({ a: a, r0: rnd(6, 12), len: rnd(26, 62), w: rnd(1, 2.2), cy: Math.random() < 0.4 });
+  // --------------------------------------------------------------------------
+  // CREATE EFFECT
+  // --------------------------------------------------------------------------
+
+  function createEffect(x, y) {
+    const effect = {
+      x,
+      y,
+      start: performance.now(),
+      rotation: random(0, Math.PI * 2),
+
+      particles: Array.from({ length: 7 }, () => ({
+        angle: random(0, Math.PI * 2),
+        distance: random(19, 39),
+        size: random(1.2, 2.2),
+        color: Math.random() > 0.5
+          ? CONFIG.primary
+          : CONFIG.secondary,
+        delay: random(0, 0.12)
+      }))
+    };
+
+    if (effects.length >= CONFIG.maxEffects) {
+      effects.shift();
     }
-    for (i = 0; i < 4; i++) {                       // đường mạch điện 4 hướng, kết thúc bằng nút vuông
-      b.rays.push({ a: i * Math.PI / 2, r0: 10, len: rnd(46, 84), w: 1.2, node: true, cy: true });
+
+    effects.push(effect);
+
+    if (!animation) {
+      animation = requestAnimationFrame(render);
     }
-    for (i = 0; i < 10; i++) {                      // hạt pixel
-      a = rnd(0, Math.PI * 2);
-      b.pix.push({ a: a, d: rnd(14, 52), s: Math.random() < 0.5 ? 2 : 3, cy: Math.random() < 0.5, dl: rnd(0, 0.25) });
-    }
-    if (bursts.length >= cfg.max) bursts.shift();
-    bursts.push(b);
-    if (!raf) raf = requestAnimationFrame(frame);
   }
 
-  function drawBurst(b, now) {
-    var t = (now - b.t0) / cfg.life;
-    if (t >= 1) return false;
-    var e = easeOut(t), fade = 1 - t, x = b.x, y = b.y, i, r, g;
+  // --------------------------------------------------------------------------
+  // DRAW EFFECT
+  // --------------------------------------------------------------------------
 
-    // 1) quầng sáng lõi
-    r = 10 + e * 46; g = cx.createRadialGradient(x, y, 0, x, y, r);
-    g.addColorStop(0, rgba(cfg.c2, 0.55 * Math.pow(fade, 1.6)));
-    g.addColorStop(0.4, rgba(cfg.c1, 0.28 * fade));
-    g.addColorStop(1, rgba(cfg.c1, 0));
-    cx.fillStyle = g; cx.beginPath(); cx.arc(x, y, r, 0, Math.PI * 2); cx.fill();
+  function draw(effect, now) {
+    const progress = (now - effect.start) / CONFIG.duration;
 
-    // 2) vòng xung đặc + vòng nét đứt xoay (cảm giác "quét dữ liệu")
-    cx.lineWidth = 1.6; cx.strokeStyle = rgba(cfg.c2, 0.75 * fade);
-    cx.beginPath(); cx.arc(x, y, 8 + e * 42, 0, Math.PI * 2); cx.stroke();
-    cx.save(); cx.translate(x, y); cx.rotate(b.rot + e * 2.2);
-    cx.setLineDash([5, 7]); cx.lineWidth = 1.2; cx.strokeStyle = rgba(cfg.c1, 0.8 * fade);
-    cx.beginPath(); cx.arc(0, 0, 14 + e * 62, 0, Math.PI * 2); cx.stroke();
-    cx.restore(); cx.setLineDash([]);
+    if (progress >= 1) return false;
 
-    // 3) tia sáng: đầu tia chạy ra trước, đuôi bám theo rồi tắt dần
-    cx.lineCap = 'round';
-    for (i = 0; i < b.rays.length; i++) {
-      var ry = b.rays[i], head = ry.r0 + ry.len * e, tail = ry.r0 + ry.len * Math.max(0, e - 0.55);
-      var ca = Math.cos(ry.a), sa = Math.sin(ry.a);
-      var x1 = x + ca * tail, y1 = y + sa * tail, x2 = x + ca * head, y2 = y + sa * head;
-      g = cx.createLinearGradient(x1, y1, x2, y2);
-      g.addColorStop(0, rgba(cfg.c1, 0));
-      g.addColorStop(1, rgba(ry.cy ? cfg.c2 : cfg.c1, 0.95 * fade));
-      cx.strokeStyle = g; cx.lineWidth = ry.w;
-      cx.beginPath(); cx.moveTo(x1, y1); cx.lineTo(x2, y2); cx.stroke();
-      if (ry.node && t > 0.25) {                    // nút vuông ở cuối đường mạch
-        var s = 4 * (1 - t) + 1.5;
-        cx.fillStyle = rgba(cfg.c2, 0.95 * fade);
-        cx.fillRect(x2 - s / 2, y2 - s / 2, s, s);
-      }
-    }
+    const t = ease(progress);
+    const fade = Math.pow(1 - progress, 1.8);
 
-    // 4) hạt pixel bay ra, nhấp nháy nhẹ
-    for (i = 0; i < b.pix.length; i++) {
-      var p = b.pix[i], pt = Math.min(1, Math.max(0, (t - p.dl) / (1 - p.dl)));
-      if (pt <= 0) continue;
-      var d = p.d * easeOut(pt), al = (1 - pt) * (Math.random() < 0.15 ? 0.4 : 1);
-      cx.fillStyle = rgba(p.cy ? cfg.c2 : cfg.c1, 0.9 * al);
-      cx.fillRect(x + Math.cos(p.a) * d - p.s / 2, y + Math.sin(p.a) * d - p.s / 2, p.s, p.s);
-    }
+    const { x, y } = effect;
+
+    // 1. Soft ambient glow
+
+    const glowRadius = 25 + t * 23;
+
+    const glow = ctx.createRadialGradient(
+      x, y, 0,
+      x, y, glowRadius
+    );
+
+    glow.addColorStop(0, rgba(CONFIG.secondary, 0.20 * fade));
+    glow.addColorStop(0.35, rgba(CONFIG.primary, 0.10 * fade));
+    glow.addColorStop(1, rgba(CONFIG.primary, 0));
+
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(x, y, glowRadius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 2. Main expanding ring
+
+    ctx.beginPath();
+    ctx.arc(x, y, 5 + t * 34, 0, Math.PI * 2);
+
+    ctx.lineWidth = 1.7 * (1 - progress * 0.45);
+    ctx.strokeStyle = rgba(CONFIG.secondary, 0.65 * fade);
+    ctx.stroke();
+
+    // 3. Secondary rotating ring
+
+    ctx.save();
+
+    ctx.translate(x, y);
+    ctx.rotate(effect.rotation + t * 0.7);
+
+    ctx.beginPath();
+    ctx.arc(
+      0, 0,
+      13 + t * 25,
+      -0.9,
+      0.9
+    );
+
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = rgba(CONFIG.primary, 0.75 * fade);
+    ctx.stroke();
+
+    ctx.restore();
+
+    // 4. Central light point
+
+    const centerAlpha = Math.max(0, 1 - progress * 5);
+
+    const center = ctx.createRadialGradient(
+      x, y, 0,
+      x, y, 8
+    );
+
+    center.addColorStop(0, rgba(CONFIG.white, centerAlpha));
+    center.addColorStop(0.35, rgba(CONFIG.secondary, centerAlpha * 0.7));
+    center.addColorStop(1, rgba(CONFIG.primary, 0));
+
+    ctx.fillStyle = center;
+    ctx.beginPath();
+    ctx.arc(x, y, 8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // 5. Minimal floating particles
+
+    effect.particles.forEach(particle => {
+      const pt = Math.max(
+        0,
+        Math.min(
+          1,
+          (progress - particle.delay) / (1 - particle.delay)
+        )
+      );
+
+      if (!pt) return;
+
+      const distance = particle.distance * ease(pt);
+      const alpha = (1 - pt) * fade;
+
+      const px = x + Math.cos(particle.angle) * distance;
+      const py = y + Math.sin(particle.angle) * distance;
+
+      ctx.fillStyle = rgba(particle.color, alpha);
+
+      ctx.beginPath();
+      ctx.arc(
+        px,
+        py,
+        particle.size * (1 - pt * 0.35),
+        0,
+        Math.PI * 2
+      );
+
+      ctx.fill();
+    });
+
     return true;
   }
 
-  function frame(now) {
-    raf = 0;
-    cx.globalCompositeOperation = 'source-over';
-    cx.clearRect(0, 0, W, H);
-    cx.globalCompositeOperation = 'lighter';        // cộng sáng -> hiệu ứng phát sáng
-    bursts = bursts.filter(function (b) { return drawBurst(b, now); });
-    cx.globalCompositeOperation = 'source-over';
-    if (bursts.length) raf = requestAnimationFrame(frame);
-    else cx.clearRect(0, 0, W, H);                  // xong -> dừng hẳn, không tốn CPU
+  // --------------------------------------------------------------------------
+  // ANIMATION LOOP
+  // --------------------------------------------------------------------------
+
+  function render(now) {
+    animation = 0;
+
+    ctx.clearRect(0, 0, width, height);
+
+    ctx.globalCompositeOperation = 'lighter';
+
+    for (let i = effects.length - 1; i >= 0; i--) {
+      if (!draw(effects[i], now)) {
+        effects.splice(i, 1);
+      }
+    }
+
+    ctx.globalCompositeOperation = 'source-over';
+
+    if (effects.length) {
+      animation = requestAnimationFrame(render);
+    } else {
+      ctx.clearRect(0, 0, width, height);
+    }
   }
 
-  // capture:true để vẫn nhận sự kiện dù phần tử khác gọi stopPropagation()
-  document.addEventListener('pointerdown', function (e) {
-    if (!cfg.enabled || reduce) return;
-    if (e.pointerType === 'mouse' && e.button !== 0) return;   // chỉ chuột trái / chạm / bút
-    ensureCanvas();
-    spawn(e.clientX, e.clientY);
-  }, { capture: true, passive: true });
+  // --------------------------------------------------------------------------
+  // GLOBAL CLICK LISTENER
+  // --------------------------------------------------------------------------
+
+  document.addEventListener('pointerdown', function (event) {
+    if (!CONFIG.enabled || reducedMotion) return;
+
+    if (event.pointerType === 'mouse' && event.button !== 0) {
+      return;
+    }
+
+    initCanvas();
+
+    createEffect(
+      event.clientX,
+      event.clientY
+    );
+
+  }, {
+    capture: true,
+    passive: true
+  });
+
+  // --------------------------------------------------------------------------
+  // PUBLIC API
+  // --------------------------------------------------------------------------
 
   window.ClickFX = {
-    enable: function () { cfg.enabled = true; },
-    disable: function () { cfg.enabled = false; },
-    setColors: function (c1, c2) { if (c1) cfg.c1 = c1; if (c2) cfg.c2 = c2; }  // dạng [r,g,b]
+    enable() {
+      CONFIG.enabled = true;
+    },
+
+    disable() {
+      CONFIG.enabled = false;
+      effects.length = 0;
+
+      if (animation) {
+        cancelAnimationFrame(animation);
+        animation = 0;
+      }
+
+      if (ctx) {
+        ctx.clearRect(0, 0, width, height);
+      }
+    },
+
+    setColors(primary, secondary) {
+      if (primary) CONFIG.primary = primary;
+      if (secondary) CONFIG.secondary = secondary;
+    },
+
+    setDuration(ms) {
+      CONFIG.duration = Math.max(200, Math.min(ms, 1500));
+    }
   };
+
 })();
