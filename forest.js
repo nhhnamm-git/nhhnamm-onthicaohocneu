@@ -112,7 +112,8 @@
         trees: [], decos: [], focus: null,
         streak: { cur: 0, best: 0, last: '' },
         day: freshDay(now), week: freshWeek(now),
-        ev: {}, cardAcc: 0, stats: { quiz: 0, cards: 0, pomo: 0 }, log: []
+        ev: {}, cardAcc: 0, stats: { quiz: 0, cards: 0, pomo: 0 }, log: [],
+        legacyImport: { version: 1, sources: {}, totals: { sec: 0, quiz: 0, cards: 0 } }
       };
     }
     var FIELDS = Object.keys(newDoc(null));
@@ -125,6 +126,9 @@
       d.day = Object.assign(freshDay(now), d.day); d.day.claimed = d.day.claimed || {};
       d.week = Object.assign(freshWeek(now), d.week); d.week.claimed = d.week.claimed || {}; d.week.days = d.week.days || [];
       d.trees = d.trees || []; d.decos = d.decos || []; d.ev = d.ev || {}; d.log = d.log || [];
+      d.legacyImport = d.legacyImport || { version: 1, sources: {}, totals: { sec: 0, quiz: 0, cards: 0 } };
+      d.legacyImport.sources = d.legacyImport.sources || {};
+      d.legacyImport.totals = Object.assign({ sec: 0, quiz: 0, cards: 0 }, d.legacyImport.totals || {});
       return d;
     }
     function rollover(d, now) {
@@ -1020,12 +1024,191 @@
     if (!S.ready && !S.err) { var b = $('#foStats'); if (b && !S.d) b.innerHTML = '<div class="card" style="padding:20px;grid-column:1/-1;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải khu rừng của bạn...</div>'; }
   }
   function onLeave() { if (!S.active) return; S.active = false; Fx.stop(); }
+
+  /* ==========================================================================
+     11A) IMPORT DỮ LIỆU HỌC CŨ — CHỈ ĐỌC NGUỒN, KHÔNG SỬA/XÓA NGUỒN
+     ----------------------------------------------------------------------------
+     Các nguồn được rules hiện tại cho phép đọc:
+       users/{uid}/studyHistory/{id}
+       users/{uid}/flashDecks/{deckId}/cards/{cardId}
+     Import có dấu vết cố định trong users/{uid}/forest/main. Mỗi document nguồn
+     chỉ được xử lý một lần; tải lại trang/đăng nhập lại không cộng trùng.
+     Chỉ quy đổi những trường có tên/ý nghĩa nhận diện được, không tự đoán.
+     ======================================================================== */
+  var legacyImportBusy = false;
+
+  function legacyNumber(obj, names) {
+    if (!obj || typeof obj !== 'object') return null;
+    for (var i = 0; i < names.length; i++) {
+      var v = obj[names[i]];
+      if (typeof v === 'number' && isFinite(v) && v >= 0) return v;
+      if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v)) && Number(v) >= 0) return Number(v);
+    }
+    return null;
+  }
+
+  function legacyDate(obj) {
+    if (!obj) return null;
+    var keys = ['completedAt', 'finishedAt', 'createdAt', 'updatedAt', 'date', 'timestamp', 'startedAt'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = obj[keys[i]], n = null;
+      if (v && typeof v.toDate === 'function') n = v.toDate();
+      else if (v && typeof v.toMillis === 'function') n = new Date(v.toMillis());
+      else if (v instanceof Date) n = v;
+      else if (typeof v === 'number') n = new Date(v < 1e12 ? v * 1000 : v);
+      else if (typeof v === 'string' && v) { var parsed = new Date(v); if (!isNaN(parsed.getTime())) n = parsed; }
+      if (n && !isNaN(n.getTime())) return n;
+    }
+    return null;
+  }
+
+  function legacyDurationSec(obj) {
+    var sec = legacyNumber(obj, ['durationSec', 'durationSeconds', 'studySeconds', 'totalSeconds', 'elapsedSeconds', 'timeSpentSeconds']);
+    if (sec !== null) return Math.floor(sec);
+    var min = legacyNumber(obj, ['durationMin', 'durationMinutes', 'studyMinutes', 'totalMinutes', 'timeSpentMinutes', 'minutes']);
+    if (min !== null) return Math.floor(min * 60);
+    var ms = legacyNumber(obj, ['durationMs', 'elapsedMs', 'timeSpentMs']);
+    if (ms !== null) return Math.floor(ms / 1000);
+    return 0;
+  }
+
+  function legacyIsCompleted(obj) {
+    if (!obj) return false;
+    return obj.completed === true || obj.finished === true || obj.isCompleted === true ||
+      obj.status === 'completed' || obj.status === 'finished' || obj.status === 'submitted' ||
+      obj.finishedAt != null || obj.completedAt != null || obj.submittedAt != null;
+  }
+
+  function legacyStableId(prefix, id) {
+    return 'legacy:' + prefix + ':' + String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100);
+  }
+
+  async function importLegacyLearningData() {
+    if (legacyImportBusy || !S.uid || !S.ready || !DB()) return;
+    legacyImportBusy = true;
+    try {
+      var db = DB(), uid = S.uid, historySnap = null, decksSnap = null;
+      // Các truy vấn đều là READ ONLY. Nếu collection chưa tồn tại, Firestore trả
+      // về danh sách rỗng; nếu rules từ chối thì bỏ qua riêng nguồn đó.
+      try { historySnap = await db.collection('users').doc(uid).collection('studyHistory').get(); }
+      catch (e) { console.warn('[Forest] Không đọc được studyHistory:', e); }
+
+      try { decksSnap = await db.collection('users').doc(uid).collection('flashDecks').get(); }
+      catch (e) { console.warn('[Forest] Không đọc được flashDecks:', e); }
+
+      var historyRows = [];
+      if (historySnap && !historySnap.empty) {
+        historySnap.forEach(function (doc) {
+          historyRows.push({ id: doc.id, data: doc.data() || {} });
+        });
+      }
+
+      var cardRows = [];
+      if (decksSnap && !decksSnap.empty) {
+        for (var di = 0; di < decksSnap.docs.length; di++) {
+          var deckDoc = decksSnap.docs[di];
+          try {
+            var cardsSnap = await db.collection('users').doc(uid)
+              .collection('flashDecks').doc(deckDoc.id).collection('cards').get();
+            if (cardsSnap && !cardsSnap.empty) {
+              cardsSnap.forEach(function (cardDoc) {
+                cardRows.push({ id: deckDoc.id + '_' + cardDoc.id, data: cardDoc.data() || {} });
+              });
+            }
+          } catch (cardErr) {
+            console.warn('[Forest] Không đọc được flashcards của bộ', deckDoc.id, cardErr);
+          }
+        }
+      }
+
+      if (!historyRows.length && !cardRows.length) return;
+
+      await mutate(function (d, ctx) {
+        d.legacyImport = d.legacyImport || { version: 1, sources: {}, totals: { sec: 0, quiz: 0, cards: 0 } };
+        d.legacyImport.sources = d.legacyImport.sources || {};
+        d.legacyImport.totals = Object.assign({ sec: 0, quiz: 0, cards: 0 }, d.legacyImport.totals || {});
+
+        historyRows.forEach(function (row) {
+          var key = legacyStableId('history', row.id);
+          if (d.legacyImport.sources[key]) return;
+          var x = row.data, sec = legacyDurationSec(x), date = legacyDate(x);
+          var kind = String(x.type || x.kind || x.activityType || x.category || '').toLowerCase();
+          var label = String(x.title || x.name || x.examName || x.lessonName || 'Hoạt động học tập cũ');
+          if (sec > 0) {
+            d.trackedSec += sec;
+            d.legacyImport.totals.sec += sec;
+            if (date && Core.dayKey(date) === Core.dayKey(ctx.now)) {
+              var addToday = Math.min(sec, Math.max(0, Core.DAY_CAP - d.day.sec));
+              d.day.sec += addToday;
+              d.week.sec += addToday;
+              if (d.day.sec >= 300) markImportedActiveDay(d, ctx);
+            }
+            pushLog(d, 'legacy', 0, 'Khôi phục thời gian học: ' + label, ctx);
+          }
+          var importedQuiz = legacyIsCompleted(x) && /(quiz|exam|test|pdf)/.test(kind);
+          if (importedQuiz) {
+            var qid = 'legacyquiz:' + row.id;
+            if (grant(d, Core.BONUS.quiz, qid, 'quiz', 'Khôi phục đề đã hoàn thành: ' + label, ctx)) {
+              d.stats.quiz++;
+              if (date && Core.dayKey(date) === Core.dayKey(ctx.now)) d.day.quiz++;
+              if (date && Core.weekKey(date) === Core.weekKey(ctx.now)) d.week.quiz++;
+            }
+            d.legacyImport.totals.quiz++;
+          }
+          // Không đánh dấu những record không có trường mà Forest hiểu được,
+          // để có thể import lại sau khi xác định đúng cấu trúc dữ liệu.
+          if (sec > 0 || importedQuiz) d.legacyImport.sources[key] = true;
+        });
+
+        cardRows.forEach(function (row) {
+          var key = legacyStableId('card', row.id);
+          if (d.legacyImport.sources[key]) return;
+          var x = row.data;
+          // Chỉ tính thẻ đã có trạng thái ôn/đã trả lời rõ ràng; không thưởng
+          // toàn bộ số thẻ trong bộ vì tạo bộ thẻ không đồng nghĩa đã học.
+          var reviewCount = legacyNumber(x, ['reviewCount', 'timesReviewed', 'repetitions', 'studyCount']);
+          var reviewed = x.reviewed === true || x.isReviewed === true || x.studied === true ||
+            x.mastered === true || x.lastReviewedAt != null || x.reviewedAt != null ||
+            (reviewCount !== null && reviewCount > 0);
+          if (reviewed) {
+            Core.reportCards(d, 1, ctx);
+            d.legacyImport.totals.cards++;
+            d.legacyImport.sources[key] = true;
+          }
+        });
+        d.legacyImport.version = 1;
+      });
+      if (S.active) renderAll();
+      if (historyRows.length || cardRows.length) {
+        console.info('[Forest] Đã kiểm tra dữ liệu cũ:', historyRows.length,
+          'lịch sử học,', cardRows.length, 'thẻ flashcard.');
+      }
+    } catch (e) {
+      console.warn('[Forest] Import dữ liệu học cũ không hoàn tất:', e);
+    } finally {
+      legacyImportBusy = false;
+    }
+  }
+
+  function markImportedActiveDay(d, ctx) {
+    // Không làm thay đổi ngày học hiện tại nếu streak đã được đánh dấu hôm nay.
+    var today = Core.dayKey(ctx.now);
+    if (d.streak.last === today) return;
+    var yesterday = Core.dayKey(Core.addDays(ctx.now, -1));
+    d.streak.cur = d.streak.last === yesterday ? d.streak.cur + 1 : 1;
+    d.streak.last = today;
+    d.streak.best = Math.max(d.streak.best, d.streak.cur);
+    if (d.week.days.indexOf(today) < 0) d.week.days.push(today);
+  }
+
   async function start(user) {
     S.booting = true; S.uid = user.uid;
     var saved = lsGet(LSK + 'buf_' + S.uid, null); T.buf = saved && saved.sec > 0 ? Math.min(saved.sec, 3600) : 0;
     try {
       await mutate(function (d, ctx, fresh) { if (!fresh) ctx.skip = true; });
       S.ready = true; S.err = null;
+      // Import lịch sử cũ sau khi tải forest/main; chạy idempotent và chỉ đọc nguồn.
+      importLegacyLearningData();
       var q = S.pending; S.pending = []; q.forEach(function (fn) { try { fn(); } catch (e) { } });
       if (S.active) renderAll();
     } catch (e) { handleErr(e, 'start'); S.uid = null; }
@@ -1050,6 +1233,7 @@
     open: function () { var u = UIM(); if (u) u.navigate('forest'); },
     reportFlashcards: reportFlashcards,
     getState: function () { return S.d ? JSON.parse(JSON.stringify(S.d)) : null; },
+    importLegacy: importLegacyLearningData,
     _core: Core
   };
 })();
