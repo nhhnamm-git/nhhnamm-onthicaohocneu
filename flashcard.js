@@ -2,14 +2,23 @@
    flashcard.js — "Flashcard" cho Website Ôn thi Cao học NEU
    ----------------------------------------------------------------------------
    CÁCH DÙNG: thêm 1 dòng cuối <body> của index.html (sau tailieu.js):
+       <script src="srs.js"></script>        <!-- BẮT BUỘC, đặt TRƯỚC flashcard.js -->
        <script src="flashcard.js"></script>
    Không sửa file nào khác. Module tự chèn nút Sidebar "Flashcard" + view mới,
    tự "wrap" UIManager.navigate và CloudSync.teardown (cùng kỹ thuật tailieu.js).
 
    DỮ LIỆU (riêng từng tài khoản):
-     users/{uid}/flashDecks/{deckId}            { name, subject, topic, total, mastered, createdAt, updatedAt }
-     users/{uid}/flashDecks/{deckId}/cards/{id} { q, a, lv, rv, lt, ca }
-       lv: 0 mới · 1 chưa thuộc · 2 hơi nhớ · 3 đã thuộc
+     users/{uid}/flashDecks/{deckId}            { name, subject, topic, total, mastered, srsv, createdAt, updatedAt }
+     users/{uid}/flashDecks/{deckId}/cards/{id} { q, a, ca, lv, rv, lt, ef, iv, rp, lps, due }
+       SM-2:  ef hệ số dễ nhớ (≥1.3) · iv khoảng cách ôn (ngày) · rp số lần nhớ liên tiếp
+              lps số lần quên · due ngày đến hạn (chỉ số ngày địa phương)
+              due ≤ 0  = THẺ MỚI (giá trị = ca − 1e13 để query được theo thứ tự tạo mà không cần index)
+       lv (chỉ để hiển thị): 0 mới · 1 đang quên · 2 đang học · 3 đã thuộc chắc (iv ≥ 21 ngày)
+     Thẻ cũ (chưa có SM-2) được tự chuyển đổi 1 lần theo lv cũ: bộ thẻ có cờ srsv = 1 sau khi chuyển.
+
+   HÀNG ĐỢI CHUNG: file này đăng ký provider "flash" với srs.js → thẻ đến hạn hôm nay
+   nằm chung hàng đợi với câu sai (mục "Ôn câu sai"). Nút Học/Ôn đến hạn ở đây dùng
+   cùng lịch SM-2; "Ôn tự do" chỉ luyện thêm, không đổi lịch.
 
    ‼️ CẦN THÊM FIRESTORE RULES (trong khối match /databases/.../documents):
      match /users/{uid}/flashDecks/{deckId} {
@@ -22,6 +31,8 @@
 (function () {
   'use strict';
   if (window.Flashcard) return;
+  if (!window.SRS) { console.error('[Flashcard] Thiếu srs.js — hãy thêm <script src="srs.js"> TRƯỚC flashcard.js.'); return; }
+  var SRS = window.SRS;
 
   /* ---------- tiện ích ---------- */
   var $ = function (s, r) { return (r || document).querySelector(s); };
@@ -45,15 +56,35 @@
 
   var LV = { 0: ['Mới', '#8fa9c4'], 1: ['Chưa thuộc', 'var(--danger,#ef4444)'], 2: ['Hơi nhớ', 'var(--warning,#f59e0b)'], 3: ['Đã thuộc', 'var(--success,#16c784)'] };
 
+  /* ---------- SM-2 trên thẻ ---------- */
+  var newDue = function (ca) { return (ca || Date.now()) - 1e13; };           // due ≤ 0 → thẻ mới, giữ thứ tự tạo
+  function blank(q, a, ca) { return { q: q, a: a, lv: 0, rv: 0, lt: 0, ca: ca, ef: 2.5, iv: 0, rp: 0, lps: 0, due: newDue(ca) }; }
+  // Thẻ cũ chưa có SM-2 → suy ra lịch từ mức nhớ lv cũ (không làm mất tiến độ đã học)
+  function legacyPatch(x, t) {
+    var lv = x.lv || 0, base = x.lt ? SRS.dayOf(x.lt) : t, p = { ef: 2.5, lps: 0 };
+    if (!lv) { p.iv = 0; p.rp = 0; p.due = newDue(x.ca); }
+    else if (lv === 1) { p.iv = 1; p.rp = 0; p.due = t; }
+    else if (lv === 2) { p.iv = 3; p.rp = 1; p.due = Math.max(t, base + 3); }
+    else { p.iv = 7; p.rp = 2; p.due = Math.max(t, base + 7); }
+    return p;
+  }
+  // Trạng thái SM-2 hiệu lực của 1 thẻ (kể cả thẻ cũ chưa chuyển đổi)
+  function eff(c) {
+    var x = c.due === undefined ? Object.assign({}, c, legacyPatch(c, SRS.today())) : c;
+    return { st: { ef: x.ef || 2.5, iv: x.iv || 0, rp: x.rp || 0 }, due: x.due, isNew: x.due <= 0, lps: x.lps || 0 };
+  }
+  function lvOf(c) { var e = eff(c); return SRS.levelOf(e.st, e.isNew); }
+
   /* ---------- state ---------- */
   var S = {
-    started: false, uid: null, decks: new Map(), cards: [], unsubs: [], unCards: null,
+    started: false, uid: null, decks: new Map(), cards: [], unsubs: [], unCards: null, decksP: null, resolveDecks: null,
     view: 'list', deckId: null, f: { q: '', subject: '', topic: '' }, cq: '', sess: null, shuffle: true, pending: null
   };
   var dRef = function () { return Env.db().collection('users').doc(S.uid).collection('flashDecks'); };
   var cRef = function (id) { return dRef().doc(id).collection('cards'); };
   function onErr(err) {
     console.error('[Flashcard]', err);
+    if (S.resolveDecks) { S.resolveDecks(); S.resolveDecks = null; }
     var r = $('#fcRoot');
     if (err && err.code === 'permission-denied' && r && !$('#fcPerm')) r.insertAdjacentHTML('afterbegin', '<div id="fcPerm" class="fc-banner"><b><i class="fa-solid fa-triangle-exclamation"></i> Firestore từ chối quyền truy cập.</b> Hãy thêm Rules cho users/{uid}/flashDecks (xem đầu file flashcard.js) rồi tải lại trang.</div>');
   }
@@ -62,22 +93,24 @@
     if (S.started) return;
     var u = Env.user(); if (!u || !Env.db()) return;
     S.started = true; S.uid = u.uid;
+    S.decksP = new Promise(function (r) { S.resolveDecks = r; });
     S.unsubs.push(dRef().onSnapshot(function (s) {
       S.decks = new Map(s.docs.map(function (d) { return [d.id, Object.assign({ id: d.id }, d.data())]; }));
+      if (S.resolveDecks) { S.resolveDecks(); S.resolveDecks = null; }
       schedule();
     }, onErr));
   }
   function stop() {
     S.unsubs.forEach(function (f) { try { f(); } catch (e) { } }); S.unsubs = [];
     if (S.unCards) { S.unCards(); S.unCards = null; }
-    S.started = false; S.decks = new Map(); S.cards = []; S.view = 'list'; S.deckId = null; S.sess = null;
+    S.started = false; S.decksP = null; S.resolveDecks = null; S.decks = new Map(); S.cards = []; S.view = 'list'; S.deckId = null; S.sess = null;
   }
 
   /* ---------- thao tác dữ liệu ---------- */
   function saveDeck(m, id) {
     var d = { name: m.name, subject: m.subject, topic: m.topic, updatedAt: Date.now() };
     if (id) return dRef().doc(id).update(d).then(function () { return id; });
-    d.createdAt = Date.now(); d.total = 0; d.mastered = 0;
+    d.createdAt = Date.now(); d.total = 0; d.mastered = 0; d.srsv = 1;
     var ref = dRef().doc(); return ref.set(d).then(function () { return ref.id; });
   }
   async function deleteDeck(id) {
@@ -87,24 +120,25 @@
     }
     await dRef().doc(id).delete();
   }
-  function addCard(id, q, a) { return cRef(id).add({ q: q, a: a, lv: 0, rv: 0, lt: 0, ca: Date.now() }); }
+  function addCard(id, q, a) { return cRef(id).add(blank(q, a, Date.now())); }
   async function importRows(id, rows, onProg) {
     var base = Date.now();
     for (var i = 0; i < rows.length; i += 400) {
       var b = Env.db().batch();
-      rows.slice(i, i + 400).forEach(function (r, k) { b.set(cRef(id).doc(), { q: r[0], a: r[1], lv: 0, rv: 0, lt: 0, ca: base + i + k }); });
+      rows.slice(i, i + 400).forEach(function (r, k) { b.set(cRef(id).doc(), blank(r[0], r[1], base + i + k)); });
       await b.commit(); if (onProg) onProg(Math.min(rows.length, i + 400));
     }
   }
   // Đồng bộ bộ đếm của bộ thẻ theo dữ liệu thật mỗi khi mở bộ thẻ
   function syncCounters() {
     var d = S.decks.get(S.deckId); if (!d) return;
-    var m = S.cards.filter(function (c) { return c.lv === 3; }).length;
+    var m = S.cards.filter(function (c) { return lvOf(c) === 3; }).length;
     if (d.total !== S.cards.length || d.mastered !== m) dRef().doc(d.id).update({ total: S.cards.length, mastered: m }).catch(function () { });
   }
   function openDeck(id, thenStudy) {
     if (S.unCards) { S.unCards(); S.unCards = null; }
     S.view = 'deck'; S.deckId = id; S.cards = []; S.cq = ''; S.pending = thenStudy || null; S.sess = null;
+    var d0 = S.decks.get(id); if (d0 && d0.srsv !== 1) migrateDeck(id).catch(onErr);
     render();
     S.unCards = cRef(id).orderBy('ca', 'asc').onSnapshot(function (s) {
       S.cards = s.docs.map(function (d) { var x = d.data(); x.id = d.id; x.lv = x.lv || 0; return x; });
@@ -116,6 +150,67 @@
   function goList() {
     if (S.unCards) { S.unCards(); S.unCards = null; }
     S.view = 'list'; S.deckId = null; S.cards = []; S.sess = null; render();
+  }
+
+  /* ---------- SM-2: chuyển đổi thẻ cũ · lưu lịch · provider hàng đợi chung ---------- */
+  var migrating = {};
+  function migrateDeck(id) {
+    if (migrating[id]) return migrating[id];
+    var p = (async function () {
+      var t = SRS.today(), sn = await cRef(id).get(), ops = [];
+      sn.docs.forEach(function (d) { var x = d.data(); if (x.due === undefined) ops.push([d.ref, legacyPatch(x, t)]); });
+      for (var i = 0; i < ops.length; i += 400) {
+        var b = Env.db().batch(); ops.slice(i, i + 400).forEach(function (o) { b.update(o[0], o[1]); }); await b.commit();
+      }
+      await dRef().doc(id).update({ srsv: 1 });
+    })();
+    migrating[id] = p; var clr = function () { delete migrating[id]; }; p.then(clr, clr);
+    return p;
+  }
+  // Ghi lịch mới của 1 thẻ (đồng thời giữ lv để hiển thị + bộ đếm "đã thuộc" của bộ thẻ)
+  function saveCard(deckId, id, ns, wasNew, oldSt) {
+    var lv = SRS.levelOf(ns, false), oldLv = SRS.levelOf(oldSt, wasNew);
+    return cRef(deckId).doc(id).update({ ef: ns.ef, iv: ns.iv, rp: ns.rp, due: ns.due, lps: ns.lps, lv: lv, rv: FV().increment(1), lt: Date.now() }).then(function () {
+      if ((lv === 3) !== (oldLv === 3)) return dRef().doc(deckId).update({ mastered: FV().increment(lv === 3 ? 1 : -1) }).catch(function () { });
+    });
+  }
+  function ensureDecks() { start(); return S.decksP || Promise.resolve(); }
+  function mkItem(d, doc, isNew) {
+    var x = doc.data();
+    return { key: 'fc:' + d.id + ':' + doc.id, deckId: d.id, id: doc.id, st: { ef: x.ef || 2.5, iv: x.iv || 0, rp: x.rp || 0 }, due: x.due, isNew: isNew, lps: x.lps || 0, data: { q: x.q, a: x.a, deckName: d.name } };
+  }
+  function registerSrs() {
+    if (registerSrs.done) return; registerSrs.done = true;
+    SRS.registerProvider('flash', {
+      label: 'Flashcard',
+      // Thẻ đến hạn hôm nay + tối đa newLimit thẻ mới (theo thứ tự tạo) của mọi bộ thẻ
+      fetchDue: async function (o) {
+        await ensureDecks();
+        var decks = Array.from(S.decks.values()); if (!decks.length) return [];
+        for (var i = 0; i < decks.length; i++) if (decks[i].srsv !== 1) { try { await migrateDeck(decks[i].id); } catch (e) { onErr(e); } }
+        var due = [], news = [];
+        await Promise.all(decks.map(async function (d) {
+          var a = await cRef(d.id).where('due', '>', 0).where('due', '<=', o.today).orderBy('due').limit(300).get();
+          a.docs.forEach(function (doc) { due.push(mkItem(d, doc, false)); });
+          if (o.newLimit > 0) {
+            var b = await cRef(d.id).where('due', '<=', 0).orderBy('due').limit(o.newLimit).get();
+            b.docs.forEach(function (doc) { news.push(mkItem(d, doc, true)); });
+          }
+        }));
+        news.sort(function (x, y) { return x.due - y.due; });
+        return due.concat(news.slice(0, Math.max(0, o.newLimit)));
+      },
+      save: function (item, ns) { return saveCard(item.deckId, item.id, ns, item.isNew, item.st); }
+    });
+  }
+  function paintQueue() {
+    if (!$('#fcQueue')) return;
+    SRS.load().then(function (c) {
+      var el = $('#fcQueue'); if (!el) return;
+      var tot = c.items.length, f = c.byKind.flash || 0, q = c.byKind.q || 0;
+      el.innerHTML = '<div class="fc-note" style="display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap"><span><b>Hàng đợi hôm nay:</b> ' + (tot ? tot + ' mục (' + f + ' flashcard · ' + q + ' câu sai) — dùng chung với mục "Ôn câu sai".' : 'không còn mục nào đến hạn 🎉') + '</span>' +
+        (tot ? '<button class="btn btn-primary btn-sm" data-act="queue"><i class="fa-solid fa-play"></i> Ôn hàng đợi</button>' : '') + '</div>';
+    }).catch(function () { });
   }
 
   /* ---------- CSS ---------- */
@@ -144,7 +239,7 @@
       '.fc-lbl{position:absolute;top:14px;left:18px;font-size:11px;font-weight:800;letter-spacing:.6px;text-transform:uppercase;color:var(--accent)}',
       '.fc-txt{font-size:20px;font-weight:700;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:100%}',
       '.fc-hint{position:absolute;bottom:12px;font-size:11.5px;color:var(--text-muted)}',
-      '.fc-rate{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;opacity:.35;pointer-events:none;transition:.2s}.fc-rate.on{opacity:1;pointer-events:auto}',
+      '.fc-rate{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;opacity:.35;pointer-events:none;transition:.2s}.fc-rate.on{opacity:1;pointer-events:auto}',
       '.fc-rate button{padding:12px 6px;border-radius:14px;font-weight:800;font-size:13.5px;color:#fff}.fc-rate small{display:block;font-weight:600;opacity:.85;font-size:10.5px}',
       '.fc-sum{text-align:center;padding:34px 20px}.fc-sum .big{font-size:42px;margin-bottom:6px}.fc-sum .row{display:flex;justify-content:center;gap:22px;margin:16px 0;font-size:13px;color:var(--text-muted)}.fc-sum .row b{display:block;font-size:22px}',
       '.fc-ov{position:fixed;inset:0;z-index:9000;background:rgba(3,19,36,.55);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center;padding:16px}',
@@ -155,7 +250,7 @@
       '.fc-note{font-size:12.5px;line-height:1.6;background:rgba(20,120,212,.07);border-radius:10px;padding:10px 12px;margin-bottom:12px;color:var(--text-main)}',
       '.fc-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;flex-wrap:wrap}',
       '.fc-prev{max-height:230px;overflow:auto;margin-top:10px;font-size:12.5px}.fc-prev table{width:100%;border-collapse:collapse}.fc-prev td,.fc-prev th{border-bottom:1px solid var(--card-border);padding:6px 8px;text-align:left;vertical-align:top}.fc-prev th{color:var(--text-muted);font-size:11px;text-transform:uppercase}',
-      '@media(max-width:560px){.fc-card{height:280px}.fc-txt{font-size:17px}}'
+      '@media(max-width:560px){.fc-card{height:280px}.fc-txt{font-size:17px}.fc-rate{grid-template-columns:repeat(2,1fr)!important}}'
     ].join('\n');
     document.head.appendChild(s);
   }
@@ -201,12 +296,12 @@
     var topics = uniq(decks.filter(function (d) { return !f.subject || d.subject === f.subject; }).map(function (d) { return d.topic; }));
     var perm = $('#fcPerm') ? $('#fcPerm').outerHTML : '';
     root.innerHTML = perm +
-      '<div class="section-head"><div><h2><i class="fa-solid fa-clone"></i> Flashcard</h2><p>Tạo thẻ ghi nhớ, lật thẻ và ôn lại những thẻ chưa thuộc</p></div>' +
+      '<div class="section-head"><div><h2><i class="fa-solid fa-clone"></i> Flashcard</h2><p>Tạo thẻ ghi nhớ và ôn lại đúng lúc theo lịch SM-2</p></div>' +
       '<div class="fc-row"><button class="btn btn-outline btn-sm" data-act="importnew"><i class="fa-solid fa-file-import"></i> Nhập từ file</button><button class="btn btn-primary btn-sm" data-act="newdeck"><i class="fa-solid fa-plus"></i> Bộ thẻ mới</button></div></div>' +
-      '<div id="fcStats" class="fc-stats"></div>' +
+      '<div id="fcQueue"></div><div id="fcStats" class="fc-stats"></div>' +
       '<div class="fc-bar"><div class="fc-search"><i class="fa-solid fa-magnifying-glass"></i><input id="fcQ" type="text" placeholder="Tìm bộ thẻ..." value="' + esc(f.q) + '" autocomplete="off"></div>' +
       '<select class="select-box" id="fcSubj">' + opts(subjects, f.subject, 'Tất cả môn học') + '</select><select class="select-box" id="fcTopic">' + opts(topics, f.topic, 'Tất cả chủ đề') + '</select></div><div id="fcGrid"></div>';
-    drawGrid();
+    drawGrid(); paintQueue();
   }
   function drawGrid() {
     var grid = $('#fcGrid'); if (!grid) return;
@@ -236,30 +331,43 @@
   function paintDeck() {
     var d = S.decks.get(S.deckId), head = $('#fcHead'); if (!head) return;
     if (!d) { if (S.decks.size || S.started) goList(); return; }
-    var total = S.cards.length, m = S.cards.filter(function (c) { return c.lv === 3; }).length, weak = total - m, p = total ? Math.round(m / total * 100) : 0;
+    var t = SRS.today(), total = S.cards.length, m = 0, dueN = 0, newN = 0;
+    S.cards.forEach(function (c) { var e = eff(c); if (e.isNew) newN++; else if (e.due <= t) dueN++; if (lvOf(c) === 3) m++; });
+    var p = total ? Math.round(m / total * 100) : 0, nb = Math.min(newN, Math.max(1, SRS.cfg().newCards));
     head.innerHTML = '<div class="card fc-head"><button class="btn btn-outline btn-sm" data-act="back" style="margin-bottom:10px"><i class="fa-solid fa-arrow-left"></i> Danh sách bộ thẻ</button>' +
       '<h3>' + esc(d.name) + '</h3><div class="fc-path">' + ([d.subject, d.topic].filter(Boolean).map(esc).join(' › ') || '<i>Chưa phân loại</i>') + '</div>' +
-      '<div class="fc-meta" style="margin:12px 0 6px"><span>' + total + ' thẻ · ' + m + ' đã thuộc · ' + weak + ' chưa thuộc</span><span>' + p + '%</span></div><div class="progress-track"><div class="progress-fill" style="width:' + p + '%"></div></div>' +
-      '<div class="fc-row" style="margin-top:14px"><button class="btn btn-primary btn-sm" data-mode="weak"' + (weak ? '' : ' disabled') + '><i class="fa-solid fa-rotate-left"></i> Ôn thẻ chưa thuộc (' + weak + ')</button>' +
-      '<button class="btn btn-outline btn-sm" data-mode="all"' + (total ? '' : ' disabled') + '><i class="fa-solid fa-play"></i> Học tất cả</button>' +
+      '<div class="fc-meta" style="margin:12px 0 6px"><span>' + total + ' thẻ · ' + dueN + ' đến hạn · ' + newN + ' mới · ' + m + ' đã thuộc chắc</span><span>' + p + '%</span></div><div class="progress-track"><div class="progress-fill" style="width:' + p + '%"></div></div>' +
+      '<div class="fc-row" style="margin-top:14px"><button class="btn btn-primary btn-sm" data-mode="due"' + (dueN ? '' : ' disabled') + '><i class="fa-solid fa-rotate-left"></i> Ôn đến hạn (' + dueN + ')</button>' +
+      '<button class="btn btn-outline btn-sm" data-mode="new"' + (newN ? '' : ' disabled') + '><i class="fa-solid fa-seedling"></i> Học thẻ mới (' + nb + ')</button>' +
+      '<button class="btn btn-outline btn-sm" data-mode="free"' + (total ? '' : ' disabled') + ' title="Luyện thêm, không thay đổi lịch SM-2"><i class="fa-solid fa-play"></i> Ôn tự do</button>' +
       '<button class="btn btn-outline btn-sm" data-act="addcard"><i class="fa-solid fa-plus"></i> Thêm thẻ</button><button class="btn btn-outline btn-sm" data-act="importdeck"><i class="fa-solid fa-file-import"></i> Nhập file</button>' +
       '<button class="btn btn-ghost btn-sm" data-dedit="' + d.id + '"><i class="fa-solid fa-pen"></i> Sửa bộ thẻ</button></div></div>';
     var q = norm(S.cq), list = S.cards.filter(function (c) { return !q || norm(c.q + ' ' + c.a).indexOf(q) > -1; }), box = $('#fcCards');
     var shown = list.slice(0, 200);
     box.innerHTML = shown.length ? shown.map(function (c) {
-      var l = LV[c.lv] || LV[0];
-      return '<div class="card fc-item"><span class="fc-tag" style="background:' + l[1] + '">' + l[0] + '</span><div class="t"><b>' + esc(c.q) + '</b><span>' + esc(c.a) + '</span></div>' +
+      var e = eff(c), l = LV[SRS.levelOf(e.st, e.isNew)] || LV[0];
+      var info = e.isNew ? 'Thẻ mới' : 'Ôn lại: ' + SRS.dueLabel(e.due) + ' · khoảng cách ' + SRS.fmtIv(e.st.iv);
+      return '<div class="card fc-item"><span class="fc-tag" style="background:' + l[1] + '">' + l[0] + '</span><div class="t"><b>' + esc(c.q) + '</b><span>' + esc(c.a) + '</span><div class="fc-path" style="margin-top:4px">' + info + '</div></div>' +
         '<button class="btn btn-outline btn-sm" data-cedit="' + c.id + '"><i class="fa-solid fa-pen"></i></button><button class="btn btn-ghost btn-sm" data-cdel="' + c.id + '"><i class="fa-solid fa-trash"></i></button></div>';
     }).join('') + (list.length > 200 ? '<div class="fc-path" style="text-align:center">Hiển thị 200/' + list.length + ' thẻ — dùng ô tìm kiếm để lọc.</div>' : '')
       : '<div class="empty-state"><i class="fa-solid fa-clone"></i><p>' + (S.cards.length ? 'Không tìm thấy thẻ nào' : 'Bộ thẻ còn trống. Bấm "Thêm thẻ" hoặc "Nhập file".') + '</p></div>';
   }
 
-  /* ---------- HỌC TẬP ---------- */
+  /* ---------- HỌC TẬP (SM-2) ---------- */
+  // mode: due = thẻ đến hạn · new = thẻ mới · free = ôn tự do (không đổi lịch) · auto = đến hạn, hết thì thẻ mới
+  var RATE_BG = { d: 'var(--danger,#ef4444)', w: 'var(--warning,#f59e0b)', g: 'var(--success,#16c784)', e: 'var(--accent,#1478d4)' };
   function startStudy(mode) {
-    var cards = S.cards.filter(function (c) { return mode === 'all' || c.lv < 3; });
-    if (!cards.length) { S.view = 'deck'; render(); return toast('warn', 'Không có thẻ để học', 'Tất cả thẻ đã thuộc hoặc bộ thẻ trống'); }
-    var q = S.shuffle ? shuffle(cards) : cards;
-    S.sess = { mode: mode, queue: q.map(function (c) { return c.id; }), total: q.length, done: 0, flipped: false, stats: { 1: 0, 2: 0, 3: 0 } };
+    var t = SRS.today(), nmax = Math.max(1, SRS.cfg().newCards);
+    var isDue = function (c) { var e = eff(c); return !e.isNew && e.due <= t; };
+    if (mode === 'auto') mode = S.cards.some(isDue) ? 'due' : 'new';
+    var cards = S.cards.filter(function (c) { return mode === 'free' || (mode === 'due' ? isDue(c) : eff(c).isNew); });
+    if (mode === 'new') cards = cards.slice(0, nmax);
+    if (!cards.length) {
+      S.view = 'deck'; S.sess = null; render();
+      return toast('warn', 'Không có thẻ để học', mode === 'due' ? 'Hôm nay không có thẻ nào đến hạn ôn' : mode === 'new' ? 'Bộ thẻ không còn thẻ mới' : 'Bộ thẻ trống');
+    }
+    var q = S.shuffle && mode !== 'new' ? shuffle(cards) : cards;
+    S.sess = { mode: mode, queue: q.map(function (c) { return c.id; }), total: q.length, done: 0, flipped: false, stats: { fail: 0, hard: 0, good: 0, easy: 0 }, relearn: {}, keys: [] };
     S.view = 'study'; render();
   }
   function cardById(id) { return S.cards.filter(function (c) { return c.id === id; })[0]; }
@@ -268,14 +376,19 @@
     if (!s || !s.queue.length) return renderSummary();
     var c = cardById(s.queue[0]);
     if (!c) { s.queue.shift(); return renderStudy(); }
-    var p = Math.round(s.done / s.total * 100);
+    var e = eff(c), rl = !!s.relearn[c.id], p = Math.round(s.done / s.total * 100);
+    var rates = rl ? [[1, 'Quên', 'd'], [4, 'Nhớ rồi', 'g']] : [[1, 'Quên', 'd'], [3, 'Khó', 'w'], [4, 'Tốt', 'g'], [5, 'Dễ', 'e']];
+    s.keys = rates.map(function (r) { return r[0]; });
+    var tag = s.mode === 'free' ? 'Ôn tự do · không đổi lịch' : (e.isNew ? 'Thẻ mới' : 'Đến hạn') + (rl ? ' · hỏi lại' : '');
     root.innerHTML = '<div class="fc-study"><div class="fc-row" style="justify-content:space-between"><button class="btn btn-outline btn-sm" data-act="exit"><i class="fa-solid fa-xmark"></i> Thoát</button>' +
       '<b style="font-size:13px">' + esc(d ? d.name : '') + '</b><label class="fc-path" style="cursor:pointer"><input type="checkbox" id="fcShuf"' + (S.shuffle ? ' checked' : '') + '> Xáo trộn</label></div>' +
-      '<div class="fc-meta" style="margin:14px 0 6px"><span>Còn ' + s.queue.length + ' thẻ</span><span>' + s.done + '/' + s.total + '</span></div><div class="progress-track"><div class="progress-fill" style="width:' + p + '%"></div></div>' +
+      '<div class="fc-meta" style="margin:14px 0 6px"><span>Còn ' + s.queue.length + ' thẻ · ' + tag + '</span><span>' + s.done + '/' + s.total + '</span></div><div class="progress-track"><div class="progress-fill" style="width:' + p + '%"></div></div>' +
       '<div class="fc-scene"><div class="fc-card" data-act="flip"><div class="fc-face"><span class="fc-lbl">Câu hỏi</span><div class="fc-txt">' + esc(c.q) + '</div><span class="fc-hint">Bấm hoặc nhấn Space để lật</span></div>' +
       '<div class="fc-face fc-back"><span class="fc-lbl">Đáp án</span><div class="fc-txt">' + esc(c.a) + '</div></div></div></div>' +
-      '<div class="fc-rate" id="fcRate"><button style="background:var(--danger,#ef4444)" data-lv="1">Chưa thuộc<small>phím 1 · học lại sớm</small></button>' +
-      '<button style="background:var(--warning,#f59e0b)" data-lv="2">Hơi nhớ<small>phím 2</small></button><button style="background:var(--success,#16c784)" data-lv="3">Đã thuộc<small>phím 3</small></button></div></div>';
+      '<div class="fc-rate" id="fcRate" style="grid-template-columns:repeat(' + rates.length + ',1fr)">' + rates.map(function (r, i) {
+        var sub = s.mode === 'free' ? 'ôn tự do' : rl ? 'học lại' : SRS.fmtIv(SRS.preview(e.st, r[0]).iv);
+        return '<button style="background:' + RATE_BG[r[2]] + '" data-lv="' + r[0] + '">' + r[1] + '<small>' + sub + ' · phím ' + (i + 1) + '</small></button>';
+      }).join('') + '</div></div>';
     s.flipped = false;
   }
   function flip() {
@@ -283,20 +396,36 @@
     s.flipped = !s.flipped; var c = $('.fc-card'), r = $('#fcRate');
     if (c) c.classList.toggle('flip', s.flipped); if (r) r.classList.toggle('on', s.flipped);
   }
-  function rate(lv) {
+  // Chấm thẻ: lần chấm ĐẦU của mỗi thẻ trong phiên mới ghi lịch SM-2; thẻ quên được hỏi lại sau ~3 thẻ (không đổi lịch nữa)
+  function rate(qv) {
     var s = S.sess; if (!s || !s.flipped) return;
     var id = s.queue.shift(), c = cardById(id); if (!c) return renderStudy();
-    c.lv = lv; s.stats[lv]++;
-    cRef(S.deckId).doc(id).update({ lv: lv, rv: FV().increment(1), lt: Date.now() }).catch(onErr);
-    if (lv === 1) s.queue.splice(Math.min(3, s.queue.length), 0, id); else s.done++;
+    var e = eff(c);
+    if (s.relearn[id]) {
+      if (qv >= 3) { s.done++; delete s.relearn[id]; } else s.queue.splice(Math.min(3, s.queue.length), 0, id);
+    } else {
+      s.stats[qv < 3 ? 'fail' : qv === 3 ? 'hard' : qv === 4 ? 'good' : 'easy']++;
+      if (s.mode !== 'free') {
+        var st = SRS.sm2(e.st, qv, SRS.cfg().maxIv), lapse = qv < 3 && e.st.rp > 0;
+        var ns = { ef: st.ef, iv: st.iv, rp: st.rp, due: SRS.today() + st.iv, lps: e.lps + (lapse ? 1 : 0) };
+        Object.assign(c, ns, { lv: SRS.levelOf(ns, false) });   // cập nhật ngay trong bộ nhớ, snapshot sẽ đồng bộ lại
+        SRS.noteDone('flash', e.isNew, false);
+        saveCard(S.deckId, id, ns, e.isNew, e.st).then(SRS.invalidate).catch(onErr);
+      }
+      if (qv < 3) { s.relearn[id] = true; s.queue.splice(Math.min(3, s.queue.length), 0, id); } else s.done++;
+    }
     renderStudy();
   }
   function renderSummary() {
-    var s = S.sess, st = s ? s.stats : { 1: 0, 2: 0, 3: 0 }, weak = S.cards.filter(function (c) { return c.lv < 3; }).length;
-    $('#fcRoot').innerHTML = '<div class="card fc-sum fc-study"><div class="big">🎉</div><h3>Hoàn thành lượt học!</h3>' +
-      '<div class="row"><span><b style="color:var(--success)">' + st[3] + '</b>Đã thuộc</span><span><b style="color:var(--warning)">' + st[2] + '</b>Hơi nhớ</span><span><b style="color:var(--danger)">' + st[1] + '</b>Lượt chưa thuộc</span></div>' +
-      '<div class="fc-row" style="justify-content:center"><button class="btn btn-primary" data-mode="weak"' + (weak ? '' : ' disabled') + '><i class="fa-solid fa-rotate-left"></i> Ôn thẻ chưa thuộc (' + weak + ')</button>' +
-      '<button class="btn btn-outline" data-mode="all"><i class="fa-solid fa-play"></i> Học lại tất cả</button><button class="btn btn-outline" data-act="exit">Về bộ thẻ</button></div></div>';
+    var s = S.sess, st = s ? s.stats : { fail: 0, hard: 0, good: 0, easy: 0 }, t = SRS.today();
+    var n = st.fail + st.hard + st.good + st.easy, ok = st.hard + st.good + st.easy, free = s && s.mode === 'free';
+    var dueLeft = S.cards.filter(function (c) { var e = eff(c); return !e.isNew && e.due <= t; }).length;
+    var newLeft = S.cards.filter(function (c) { return eff(c).isNew; }).length;
+    $('#fcRoot').innerHTML = '<div class="card fc-sum fc-study"><div class="big">🎉</div><h3>Hoàn thành lượt học!</h3>' + (free ? '<div class="fc-path">Ôn tự do không thay đổi lịch SM-2.</div>' : '') +
+      '<div class="row"><span><b>' + n + '</b>Đã ôn</span><span><b style="color:var(--success)">' + ok + '</b>Nhớ</span><span><b style="color:var(--danger)">' + st.fail + '</b>Quên</span></div>' +
+      '<div class="fc-row" style="justify-content:center"><button class="btn btn-primary" data-mode="due"' + (dueLeft ? '' : ' disabled') + '><i class="fa-solid fa-rotate-left"></i> Ôn thẻ đến hạn (' + dueLeft + ')</button>' +
+      '<button class="btn btn-outline" data-mode="new"' + (newLeft ? '' : ' disabled') + '><i class="fa-solid fa-seedling"></i> Học thêm thẻ mới (' + Math.min(newLeft, Math.max(1, SRS.cfg().newCards)) + ')</button>' +
+      '<button class="btn btn-outline" data-act="exit">Về bộ thẻ</button></div></div>';
     S.sess = null;
   }
 
@@ -423,8 +552,8 @@
     root.addEventListener('click', function (e) {
       var t = e.target, el;
       if ((el = t.closest('[data-lv]'))) return rate(+el.dataset.lv);
-      if ((el = t.closest('[data-mode]'))) { if (el.disabled) return; return S.view === 'study' || !S.sess ? startStudy(el.dataset.mode) : startStudy(el.dataset.mode); }
-      if ((el = t.closest('[data-study]'))) { e.stopPropagation(); return openDeck(el.dataset.study, 'weak'); }
+      if ((el = t.closest('[data-mode]'))) { if (el.disabled) return; return startStudy(el.dataset.mode); }
+      if ((el = t.closest('[data-study]'))) { e.stopPropagation(); return openDeck(el.dataset.study, 'auto'); }
       if ((el = t.closest('[data-dedit]'))) { e.stopPropagation(); return openDeckForm(el.dataset.dedit); }
       if ((el = t.closest('[data-ddel]'))) {
         e.stopPropagation(); var d = S.decks.get(el.dataset.ddel); if (!d) return;
@@ -439,6 +568,7 @@
         else if (a === 'newdeck') openDeckForm(); else if (a === 'importnew') openImport(null);
         else if (a === 'importdeck') openImport(S.deckId); else if (a === 'addcard') openCardForm();
         else if (a === 'exit') { S.view = 'deck'; S.sess = null; render(); }
+        else if (a === 'queue') SRS.start();
       }
     });
     root.addEventListener('input', function (e) {
@@ -452,13 +582,13 @@
       else if (id === 'fcShuf') S.shuffle = e.target.checked;
     });
   }
-  // Phím tắt khi học: Space/Enter lật · 1/2/3 đánh giá
+  // Phím tắt khi học: Space/Enter lật · 1-4 chấm (Quên / Khó / Tốt / Dễ)
   document.addEventListener('keydown', function (e) {
     if (!S.sess || S.view !== 'study') return;
     var v = $('#view-flashcard'); if (!v || !v.classList.contains('active')) return;
     var t = e.target; if (e.ctrlKey || e.metaKey || e.altKey || (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     if (e.key === ' ' || e.key === 'Enter') { if (t && t.tagName === 'BUTTON') return; e.preventDefault(); flip(); }
-    else if (S.sess.flipped && (e.key === '1' || e.key === '2' || e.key === '3')) { e.preventDefault(); rate(+e.key); }
+    else if (S.sess.flipped) { var n = parseInt(e.key, 10), ks = S.sess.keys || []; if (n >= 1 && n <= ks.length) { e.preventDefault(); rate(ks[n - 1]); } }
   });
 
   /* ---------- MÓC VÀO VÒNG ĐỜI CÓ SẴN ---------- */
@@ -466,7 +596,7 @@
     var ui = Env.ui();
     if (ui && !ui.__fcWrapped) {
       ui.__fcWrapped = true; ui.titles = ui.titles || {};
-      ui.titles.flashcard = ['Flashcard', 'Tạo thẻ ghi nhớ, lật thẻ và ôn tập theo mức độ nhớ'];
+      ui.titles.flashcard = ['Flashcard', 'Tạo thẻ ghi nhớ, lật thẻ và ôn tập đúng lúc theo lịch SM-2'];
       var orig = ui.navigate.bind(ui);
       ui.navigate = function (view) {
         var r = orig(view);
@@ -482,7 +612,8 @@
     } catch (e) { }
   }
 
-  function init() { css(); injectDom(); wireRoot(); hook(); }
+  function init() { css(); injectDom(); wireRoot(); hook(); registerSrs(); }
+  window.addEventListener('srs:change', function () { if (S.view === 'list') paintQueue(); });
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
   window.Flashcard = { open: function () { var u = Env.ui(); if (u) u.navigate('flashcard'); } };
