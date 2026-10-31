@@ -1,31 +1,41 @@
 /* ============================================================================
    forest.js — "Study Forest" (Rừng phép thuật) cho Website Ôn thi Cao học NEU
+   BẢN VIẾT LẠI: khôi phục GIỜ HỌC CŨ + cho phép QUY ĐỔI ra Linh quang
    ----------------------------------------------------------------------------
    CÁCH DÙNG (1 dòng, đặt cuối <body> của index.html, SAU các script khác):
        <script src="forest.js"></script>
 
-   Không sửa file nào khác. Module tự chèn nút sidebar "Study Forest" + 1 view mới,
-   và chỉ hoạt động sau khi người dùng đăng nhập & được duyệt (window.__appInitialized).
+   KHÔNG cần sửa Firestore Rules. Chỉ dùng các quyền đã có sẵn:
+     - users/{uid}/forest/main   (đọc/ghi dữ liệu khu rừng của chính mình)
+     - leaderboard/{uid}         (đọc: có trường studyTimeSec đồng bộ từ app)
+     - users/{uid}               (đọc hồ sơ của chính mình: totalStudyMinutes)
+     - localStorage của trình duyệt (examMasterPro_dailyLog / _history)
 
-   NGUỒN ĐIỂM NUÔI CÂY (quy đổi 1 điểm = 1 phút nuôi cây)
-   - Thời gian học THẬT: đo bằng bộ đếm hoạt động (tab đang hiển thị, có thao tác,
-     đang ở màn hình học: Làm bài / Đề PDF / Tài liệu / Khóa học / Flashcard / Chấm luận,
-     hoặc Pomodoro đang chạy). 10 phút học = 10 phút nuôi cây.
-   - Hoàn thành đề thi (QuizManager.finishQuiz / PdfExamManager.submit): +10 phút
-   - 20 flashcard: +5 phút   (flashcard.js bắn sự kiện, xem ghi chú bên dưới)
-   - 1 phiên Pomodoro (study-tools.js): +25 phút
-   - Hoàn thành mục tiêu ngày (mục tiêu của study-tools.js): +10 phút
-   - Chuỗi 7 ngày: +30 phút · Chuỗi 30 ngày: +120 phút
+   VÌ SAO BẢN TRƯỚC KHÔNG ĐỔI ĐƯỢC ĐIỂM
+   Bản cũ tìm giờ học cũ trong users/{uid}/studyHistory và flashDecks — những nơi
+   KHÔNG lưu thời gian làm bài của app nên luôn ra 0. Giờ học thật của app nằm ở:
+     1) localStorage: examMasterPro_dailyLog (timeSec theo ngày) + _history
+     2) Firestore leaderboard/{uid}.studyTimeSec (đồng bộ mỗi lần làm bài)
+     3) Firestore users/{uid}.totalStudyMinutes (API signin.js, nếu có dùng)
+   Bản này quét CẢ 3 nguồn, lấy GIÁ TRỊ LỚN NHẤT (không cộng dồn → không nhân đôi),
+   loại phần đã được Study Forest tự đo sau ngày khu rừng được tạo, rồi lưu mốc
+   "tổng giờ học cũ" vào forest/main (chỉ tăng, không bao giờ giảm — kể cả khi bạn
+   xoá dữ liệu trình duyệt).
 
-   TÍCH HỢP FLASHCARD (flashcard.js chưa được gửi kèm nên dùng "hợp đồng sự kiện"):
-   tại nơi 1 thẻ được ôn xong, thêm 1 dòng:
-       window.dispatchEvent(new CustomEvent('forest:flashcards', { detail: { count: 1 } }));
-   (hoặc gọi trực tiếp  Forest.reportFlashcards(1) ). Thời gian ở màn hình có id chứa
-   "flash" cũng được tính vào thời gian học thật.
+   QUY ĐỔI GIỜ HỌC CŨ (do người dùng tự bấm trong thẻ "Giờ học cũ"):
+     • Cứ 6 phút học cũ  → 1 Linh quang  (1 giờ = 10 Linh quang)
+     • Đồng thời cộng đúng số phút đó vào "điểm nuôi cây" (để lên cấp rừng, mở
+       khoá loài Rare/Epic/Legendary và nuôi cây lớn)
+     • Có thể đổi một phần hoặc toàn bộ; phần chưa đổi được giữ lại để đổi sau.
+     • Mọi lần đổi đi qua transaction và ghi "convertedSec" → không đổi trùng.
 
-   DỮ LIỆU: Firestore  users/{uid}/forest/main  (1 document duy nhất, ghi theo lô:
-   ~5 phút/lần + khi có sự kiện, mọi thay đổi đi qua transaction nên không cộng trùng).
-   Cần thêm Firestore Rules — xem file forest.rules đi kèm.
+   NGUỒN ĐIỂM NUÔI CÂY KHÁC (1 điểm = 1 phút nuôi cây)
+   - Thời gian học THẬT đo bằng bộ đếm hoạt động (tab đang hiển thị, có thao tác,
+     ở màn hình học, hoặc Pomodoro đang chạy)
+   - Hoàn thành đề (QuizManager.finishQuiz / PdfExamManager.submit): +10 phút
+   - 20 flashcard: +5 · Pomodoro: +25 · Mục tiêu ngày: +10 · Chuỗi 7 ngày: +30 · 30 ngày: +120
+   Flashcard: window.dispatchEvent(new CustomEvent('forest:flashcards',{detail:{count:1}}))
+   hoặc Forest.reportFlashcards(1).
    ========================================================================== */
 (function () {
   'use strict';
@@ -33,7 +43,7 @@
   if (BROWSER && window.Forest) return;
 
   /* ==========================================================================
-     1) CORE — dữ liệu & luật chơi thuần (không đụng DOM/Firebase → test được)
+     1) CORE — dữ liệu & luật chơi thuần (không đụng DOM/Firebase)
      ======================================================================== */
   var Core = (function () {
     var pad = function (n) { return (n < 10 ? '0' : '') + n; };
@@ -44,7 +54,7 @@
     var dayNum = function (d) { return Math.floor((d || new Date()).getTime() / 86400000); };
 
     var STAGES = ['Hạt giống', 'Mầm non', 'Cây con', 'Cây non', 'Trưởng thành', 'Cổ thụ phát sáng'];
-    var THRESH = [0, 20, 60, 120, 240, 480];            // phút nuôi (độ Common)
+    var THRESH = [0, 20, 60, 120, 240, 480];
     var STAGE_SPARKS = [0, 2, 4, 8, 12, 20];
     var RARITY = {
       common: { label: 'Common', mul: 1, cost: 10, minLevel: 1, color: '#9fb4c8' },
@@ -53,10 +63,10 @@
       legendary: { label: 'Legendary', mul: 3.2, cost: 260, minLevel: 10, color: '#ffb521' }
     };
     var BONUS = { quiz: 10, cards20: 5, pomo: 25, goal: 10, streak7: 30, streak30: 120 };
-    var DAY_CAP = 36000;       // tối đa 10 giờ tính được / ngày
+    var DAY_CAP = 36000;
     var MAX_TREES = 64;
+    var LEGACY = { SEC_PER_SPARK: 360, MAX_SEC: 36000 * 3650 };
 
-    // seas: 'full' = đổi màu theo mùa · 'conifer' = chỉ đổi vào mùa đông · 'none'
     var SPECIES = [
       { id: 'oak', name: 'Sồi Xanh', r: 'common', shape: 'round', trunk: ['#6b4a2f', '#4a3220'], leaf: ['#7bd36a', '#3f9a4a', '#2c7a3d'], glow: '#b5ff9a', seas: 'full', desc: 'Cây phổ biến, vững chãi.' },
       { id: 'pine', name: 'Thông Sương', r: 'common', shape: 'pine', trunk: ['#5d4330', '#3f2d20'], leaf: ['#4fae7b', '#2f8059', '#1f5e44'], glow: '#9fffd0', seas: 'conifer', desc: 'Xanh quanh năm, nhuốm sương.' },
@@ -86,7 +96,6 @@
     ];
     var DC = {}; DECOS.forEach(function (x) { DC[x.id] = x; });
 
-    // mở rộng từ landLevel hiện tại → landLevel+1
     var LAND = [null, { cost: 40, lv: 2 }, { cost: 110, lv: 4 }, { cost: 240, lv: 6 }, { cost: 450, lv: 9 }, { cost: 800, lv: 13 }];
     var sideOf = function (land) { return 2 + land; };
 
@@ -103,20 +112,20 @@
 
     function freshDay(now) { return { k: dayKey(now), sec: 0, quiz: 0, cards: 0, pomo: 0, cardChunks: 0, claimed: {} }; }
     function freshWeek(now) { return { k: weekKey(now), sec: 0, quiz: 0, pomo: 0, days: [], claimed: {} }; }
+    function freshLegacy() { return { baseSec: 0, convertedSec: 0, sparks: 0, srcs: {}, scannedAt: 0 }; }
 
     function newDoc(ts, now) {
       now = now || new Date();
       return {
-        v: 1, trackedSec: 0, bonusMin: 0, fed: 0, lastTrackAt: ts, createdAt: ts,
+        v: 2, trackedSec: 0, bonusMin: 0, fed: 0, lastTrackAt: ts, createdAt: ts,
         sparksEarned: 30, sparksSpent: 0, lvlClaimed: 0, landLevel: 1,
         trees: [], decos: [], focus: null,
         streak: { cur: 0, best: 0, last: '' },
         day: freshDay(now), week: freshWeek(now),
         ev: {}, cardAcc: 0, stats: { quiz: 0, cards: 0, pomo: 0 }, log: [],
-        legacyImport: { version: 1, sources: {}, totals: { sec: 0, quiz: 0, cards: 0 } }
+        legacy: freshLegacy()
       };
     }
-    var FIELDS = Object.keys(newDoc(null));
 
     function normalize(raw, now) {
       var base = newDoc(null, now), d = {}, k;
@@ -126,9 +135,8 @@
       d.day = Object.assign(freshDay(now), d.day); d.day.claimed = d.day.claimed || {};
       d.week = Object.assign(freshWeek(now), d.week); d.week.claimed = d.week.claimed || {}; d.week.days = d.week.days || [];
       d.trees = d.trees || []; d.decos = d.decos || []; d.ev = d.ev || {}; d.log = d.log || [];
-      d.legacyImport = d.legacyImport || { version: 1, sources: {}, totals: { sec: 0, quiz: 0, cards: 0 } };
-      d.legacyImport.sources = d.legacyImport.sources || {};
-      d.legacyImport.totals = Object.assign({ sec: 0, quiz: 0, cards: 0 }, d.legacyImport.totals || {});
+      d.legacy = Object.assign(freshLegacy(), d.legacy || {});
+      d.legacy.srcs = d.legacy.srcs || {};
       return d;
     }
     function rollover(d, now) {
@@ -153,6 +161,10 @@
       return { stage: s, pct: Math.max(0, Math.min(100, (t.g - a) / (b - a) * 100)), left: Math.max(0, b - t.g) };
     }
 
+    function durText(sec) {
+      sec = Math.max(0, Math.floor(sec)); var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60);
+      return h ? h + ' giờ ' + m + ' phút' : m + ' phút';
+    }
     function pushLog(d, kind, min, text, ctx) {
       d.log.unshift({ t: ctx.now.getTime(), k: kind, m: r3(min), n: text });
       if (d.log.length > 25) d.log.length = 25;
@@ -176,7 +188,6 @@
       if (d.streak.cur === 7) grant(d, BONUS.streak7, 'st7:' + start, 'streak', 'Chuỗi 7 ngày học liên tiếp', ctx);
       if (d.streak.cur === 30) grant(d, BONUS.streak30, 'st30:' + start, 'streak', 'Chuỗi 30 ngày học liên tiếp', ctx);
     }
-    // thời gian học thật (giây nguyên)
     function addTracked(d, sec, ctx) {
       sec = Math.floor(sec);
       sec = Math.min(sec, Math.max(0, DAY_CAP - d.day.sec));
@@ -206,6 +217,27 @@
       var ok = Math.max(0, Math.min(chunks, 20 - d.day.cardChunks));
       if (ok > 0) { d.day.cardChunks += ok; grant(d, ok * BONUS.cards20, null, 'cards', 'Ôn ' + (ok * 20) + ' flashcard', ctx); }
       return ok;
+    }
+
+    /* ---- GIỜ HỌC CŨ ---- */
+    var legacyAvail = function (d) { return Math.max(0, d.legacy.baseSec - d.legacy.convertedSec); };
+    // Mốc tổng giờ học cũ chỉ TĂNG. Trả về true nếu có thay đổi cần ghi.
+    function applyLegacyScan(d, scan, ctx) {
+      var L = d.legacy, total = Math.max(0, Math.min(LEGACY.MAX_SEC, Math.floor(scan.total) || 0));
+      if (total <= L.baseSec) return false;
+      L.baseSec = total; L.srcs = scan.srcs || {}; L.scannedAt = ctx.now.getTime();
+      return true;
+    }
+    function convertLegacy(d, sec, ctx) {
+      sec = Math.floor(sec) || 0;
+      var avail = legacyAvail(d); sec = Math.min(sec, avail);
+      var units = Math.floor(sec / LEGACY.SEC_PER_SPARK);
+      if (units < 1) throw new Error('Cần tối thiểu ' + (LEGACY.SEC_PER_SPARK / 60) + ' phút học cũ để đổi 1 Linh quang');
+      var use = units * LEGACY.SEC_PER_SPARK, min = use / 60;
+      d.legacy.convertedSec += use; d.legacy.sparks += units;
+      d.sparksEarned += units; d.bonusMin = r3(d.bonusMin + min);
+      pushLog(d, 'legacy', min, 'Quy đổi ' + durText(use) + ' học cũ → +' + units + ' Linh quang', ctx);
+      return { sparks: units, min: min, sec: use };
     }
 
     function distribute(d, ctx) {
@@ -241,7 +273,6 @@
     }
     function settle(d, ctx) { distribute(d, ctx); claimLevels(d, ctx); pruneEv(d, ctx.now); }
 
-    /* ---- hành động của người chơi (ném Error khi không hợp lệ) ---- */
     var cleanName = function (n) { return String(n || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 24); };
     var uid = function () { return Math.random().toString(36).slice(2, 9) + Date.now().toString(36).slice(-3); };
     function occupied(d, pos) {
@@ -310,10 +341,11 @@
 
     return {
       STAGES: STAGES, THRESH: THRESH, RARITY: RARITY, BONUS: BONUS, SPECIES: SPECIES, SP: SP, DECOS: DECOS, DC: DC, LAND: LAND, QUESTS: QUESTS,
-      FIELDS: FIELDS, DAY_CAP: DAY_CAP, MAX_TREES: MAX_TREES,
+      LEGACY: LEGACY, DAY_CAP: DAY_CAP, MAX_TREES: MAX_TREES,
       dayKey: dayKey, weekKey: weekKey, addDays: addDays, sideOf: sideOf, newDoc: newDoc, normalize: normalize, rollover: rollover,
       earned: earned, balance: balance, level: level, levelMin: levelMin, capOf: capOf, stageOf: stageOf, stageProgress: stageProgress,
-      addTracked: addTracked, completeQuiz: completeQuiz, completePomo: completePomo, completeGoal: completeGoal, reportCards: reportCards,
+      durText: durText, addTracked: addTracked, completeQuiz: completeQuiz, completePomo: completePomo, completeGoal: completeGoal, reportCards: reportCards,
+      legacyAvail: legacyAvail, applyLegacyScan: applyLegacyScan, convertLegacy: convertLegacy,
       settle: settle, plant: plant, placeDeco: placeDeco, removeTree: removeTree, removeDeco: removeDeco, renameTree: renameTree,
       setFocus: setFocus, expand: expand, claimQuest: claimQuest, occupied: occupied
     };
@@ -335,12 +367,14 @@
   function lsGet(k, d) { try { var v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } }
   function lsSet(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { } }
   function tsMs(t) { return t && typeof t.toMillis === 'function' ? t.toMillis() : (typeof t === 'number' ? t : Date.now()); }
-  function fmtDur(sec) { sec = Math.max(0, Math.floor(sec)); var h = Math.floor(sec / 3600), m = Math.floor(sec % 3600 / 60); return h ? h + ' giờ ' + m + ' phút' : m + ' phút'; }
+  function fmtDur(sec) { return Core.durText(sec); }
   function fmtMin(m) { return Math.floor(m * 10) / 10; }
+  function fmtHr(sec) { return (Math.round(sec / 360) / 10).toString().replace('.', ',') + ' giờ'; }
 
   var S = {
     uid: null, d: null, ready: false, booting: false, active: false, err: null,
-    tab: 'plant', sel: null, season: lsGet(LSK + 'season', 'auto'), pending: [], goalTried: {}, prevStage: {}
+    tab: 'plant', sel: null, season: lsGet(LSK + 'season', 'auto'), pending: [], goalTried: {}, prevStage: {},
+    lgBusy: false, lgAt: 0, lgDone: false, lgSrcs: null, lgErr: null
   };
   var T = { buf: 0, last: Date.now(), lastAct: Date.now(), lastIframe: 0, flushing: false, cards: 0, cardsAt: 0 };
   var TAB = Math.random().toString(36).slice(2);
@@ -377,9 +411,8 @@
   }
   function handleErr(e, what) {
     console.warn('[Forest] ' + what, e);
-    if (e && (e.code === 'permission-denied' || /permission/i.test(e.message || ''))) {
-      S.err = 'perm';
-    } else if (e && e.code) { S.err = S.err || 'net'; }
+    if (e && (e.code === 'permission-denied' || /permission/i.test(e.message || ''))) S.err = 'perm';
+    else if (e && e.code) S.err = S.err || 'net';
     if (S.active) renderBanner();
   }
   function whenReady(fn) { if (S.ready) fn(); else S.pending.push(fn); }
@@ -462,12 +495,11 @@
   document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') { flushTracked(); pollCards(Infinity); } });
 
   /* ---- tích hợp: Pomodoro (study-tools.js) + mục tiêu ngày ---- */
-  var integ = { busy: false };
+  var integ = { busy: false, after: null };
   function pollIntegrations(pomo) {
     if (integ.busy || !S.ready) return;
     var jobs = [], today = Core.dayKey(), dev = lsGet(LSK + 'dev', null);
     if (!dev) { dev = TAB; lsSet(LSK + 'dev', dev); }
-    // Pomodoro: đếm số phiên "done" tăng lên kể từ lần xem trước (không cộng hồi tố)
     if (pomo && typeof pomo.done === 'number') {
       var key = LSK + 'pomoSeen_' + S.uid, seen = lsGet(key, null);
       if (seen === null || seen > pomo.done) { lsSet(key, pomo.done); }
@@ -477,7 +509,6 @@
         integ.after = function () { lsSet(key, pomo.done); };
       }
     }
-    // Mục tiêu ngày (cùng mục tiêu với study-tools.js, đo bằng số câu đã trả lời)
     if (!S.goalTried[today] && S.d && !S.d.ev['goal:' + today]) {
       var log = lsGet('examMasterPro_dailyLog', {}), t = log[today] || {}, goal = lsGet('examMasterPro_tools_goal', 30);
       if ((t.correct || 0) + (t.wrong || 0) >= goal && goal > 0) {
@@ -546,11 +577,72 @@
   }
 
   /* ==========================================================================
-     5) SVG: CÂY (6 giai đoạn × 13 loài) & VẬT TRANG TRÍ
+     5) QUÉT GIỜ HỌC CŨ — chỉ ĐỌC; dùng đúng các nguồn mà rules hiện tại cho phép
+     ======================================================================== */
+  var num = function (v) { v = Number(v); return isFinite(v) && v > 0 ? v : 0; };
+  async function scanLegacy(force) {
+    if (!S.ready || !S.uid || !S.d || S.lgBusy || !DB()) return;
+    var now = Date.now();
+    if (!force && S.lgAt && now - S.lgAt < 600000) return;
+    S.lgBusy = true; S.lgErr = null; if (S.active) renderLegacy();
+    try {
+      var db = DB(), uid = S.uid;
+      // Ngày khu rừng được tạo: từ ngày này trở đi Study Forest đã tự đo → không tính lại.
+      var createdMs = tsMs(S.d.createdAt), ck = Core.dayKey(new Date(createdMs));
+
+      // (1) localStorage — nhật ký ngày (timeSec) và lịch sử làm bài
+      var log = lsGet('examMasterPro_dailyLog', {}), lsBefore = 0, lsSince = 0;
+      Object.keys(log || {}).forEach(function (k) {
+        var s = num(log[k] && log[k].timeSec);
+        if (k < ck) lsBefore += s; else lsSince += s;
+      });
+      var hist = lsGet('examMasterPro_history', []), histBefore = 0;
+      if (Array.isArray(hist)) hist.forEach(function (h) {
+        var s = num(h && h.timeSec), t = Date.parse(h && h.timestamp);
+        if (s && (isNaN(t) || t < createdMs)) histBefore += s;
+      });
+
+      // (2) Firestore leaderboard/{uid}.studyTimeSec  (tổng, đồng bộ giữa các thiết bị)
+      var lb = 0;
+      try {
+        var ls = await db.collection('leaderboard').doc(uid).get();
+        if (ls.exists) lb = num(ls.data().studyTimeSec);
+      } catch (e) { console.warn('[Forest] Không đọc được leaderboard:', e); }
+      var lbAdj = Math.max(0, lb - lsSince); // trừ phần đã nằm trong thời gian Forest tự đo
+
+      // (3) Firestore users/{uid}.totalStudyMinutes (API signin.js)
+      var usr = 0;
+      try {
+        var us = await db.collection('users').doc(uid).get();
+        if (us.exists) usr = num(us.data().totalStudyMinutes) * 60;
+      } catch (e) { console.warn('[Forest] Không đọc được hồ sơ users:', e); }
+
+      var srcs = { ls: Math.floor(lsBefore), hist: Math.floor(histBefore), lb: Math.floor(lbAdj), usr: Math.floor(usr) };
+      var total = Math.max(srcs.ls, srcs.hist, srcs.lb, srcs.usr);
+      S.lgSrcs = srcs;
+      await mutate(function (d, ctx) { if (!Core.applyLegacyScan(d, { total: total, srcs: srcs }, ctx)) ctx.skip = true; });
+      S.lgAt = Date.now(); S.lgDone = true;
+    } catch (e) {
+      S.lgErr = e && e.message ? e.message : 'Không quét được dữ liệu';
+      handleErr(e, 'scanLegacy');
+    }
+    S.lgBusy = false;
+    if (S.active) renderLegacy();
+  }
+  function convertLegacy(sec) {
+    return mutate(function (d, ctx) { return Core.convertLegacy(d, sec, ctx); }).then(function (ctx) {
+      var o = ctx.out;
+      toast('success', '✨ Quy đổi thành công', '+' + o.sparks + ' Linh quang · +' + fmtMin(o.min) + ' phút nuôi cây');
+      floatText('+' + o.sparks + ' Linh quang');
+      return ctx;
+    }).catch(function (e) { toast('error', 'Study Forest', e.message || 'Không quy đổi được'); handleErr(e, 'convert'); });
+  }
+
+  /* ==========================================================================
+     6) SVG: CÂY (6 giai đoạn × 13 loài) & VẬT TRANG TRÍ
      ======================================================================== */
   var GID = 0;
   function rng(seed) { var s = (seed >>> 0) || 1; return function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
-  var SEASON_FILTER = { none: '', full: '', conifer: '' };
   function treeSVG(spId, stage) {
     var sp = Core.SP[spId] || Core.SPECIES[0], id = 'fg' + (++GID), c1 = sp.leaf[0], c2 = sp.leaf[1], c3 = sp.leaf[2];
     var R = rng(spId.length * 977 + stage * 131 + spId.charCodeAt(0)), o = '', i;
@@ -574,14 +666,12 @@
     var cy = 108 - H - r * 0.45, cx = 50, w2 = W * 0.6, rar = sp.r;
     if (stage >= 5 || (stage === 4 && (rar === 'epic' || rar === 'legendary')))
       o += '<circle cx="50" cy="' + cy + '" r="' + (r * 1.7) + '" fill="url(#' + id + 'a)" class="fo-aura" opacity="' + (stage >= 5 ? 0.95 : 0.55) + '"/>';
-    // thân
     o += '<path d="M' + (50 - W / 2) + ' 108 C' + (50 - W / 2) + ' ' + (108 - H * 0.5) + ' ' + (50 - w2 / 2) + ' ' + (108 - H * 0.6) + ' ' + (50 - w2 / 2) + ' ' + (108 - H) +
       ' L' + (50 + w2 / 2) + ' ' + (108 - H) + ' C' + (50 + w2 / 2) + ' ' + (108 - H * 0.6) + ' ' + (50 + W / 2) + ' ' + (108 - H * 0.5) + ' ' + (50 + W / 2) + ' 108Z" fill="url(#' + id + 't)"/>';
     if (stage >= 3) o += '<path d="M' + (50 - W) + ' 109 Q' + (50 - W / 2) + ' 103 50 103 Q' + (50 + W / 2) + ' 103 ' + (50 + W) + ' 109Z" fill="url(#' + id + 't)"/>';
     if (stage >= 4) o += '<path d="M50 ' + (108 - H * 0.5) + ' Q' + (50 - r * 0.6) + ' ' + (108 - H * 0.75) + ' ' + (50 - r * 0.8) + ' ' + (cy + r * 0.2) + '" stroke="' + sp.trunk[1] + '" stroke-width="2.4" fill="none"/>' +
       '<path d="M50 ' + (108 - H * 0.55) + ' Q' + (50 + r * 0.6) + ' ' + (108 - H * 0.8) + ' ' + (50 + r * 0.8) + ' ' + (cy + r * 0.1) + '" stroke="' + sp.trunk[1] + '" stroke-width="2.4" fill="none"/>';
-    // tán theo dáng
-    var shape = sp.shape, b;
+    var shape = sp.shape;
     if (shape === 'round' || shape === 'blossom' || shape === 'willow') {
       var rr = shape === 'willow' ? r * 0.85 : r;
       [[-.55, .25, .68], [.55, .2, .64], [0, -.42, .72]].forEach(function (p) { o += '<circle cx="' + (cx + p[0] * rr) + '" cy="' + (cy + p[1] * rr) + '" r="' + (p[2] * rr) + '" fill="' + c3 + '"/>'; });
@@ -606,7 +696,7 @@
         o += '<polygon points="50,' + top + ' ' + (50 - half) + ',' + (top + tH) + ' ' + (50 + half) + ',' + (top + tH) + '" fill="' + (i % 2 ? c3 : (i === 0 ? 'url(#' + id + 'l)' : c2)) + '"/>' +
           '<polygon points="50,' + top + ' ' + (50 - half * 0.2) + ',' + (top + tH * 0.5) + ' ' + (50 + half * 0.55) + ',' + (top + tH * 0.9) + ' ' + (50 + half) + ',' + (top + tH) + ' 50,' + (top + tH) + '" fill="rgba(0,0,0,.1)"/>';
       }
-    } else { // crystal
+    } else {
       var sh = function (ang, sc, fill) { return '<g transform="rotate(' + ang + ' ' + cx + ' ' + (cy + r * 0.5) + ')"><polygon points="' + cx + ',' + (cy - r * 1.05 * sc) + ' ' + (cx + r * 0.36 * sc) + ',' + cy + ' ' + cx + ',' + (cy + r * 0.55) + ' ' + (cx - r * 0.36 * sc) + ',' + cy + '" fill="' + fill + '" stroke="rgba(255,255,255,.65)" stroke-width=".8" opacity=".92"/><line x1="' + cx + '" y1="' + (cy - r * 1.05 * sc) + '" x2="' + cx + '" y2="' + (cy + r * 0.55) + '" stroke="rgba(255,255,255,.35)" stroke-width=".6"/></g>'; };
       o += sh(-52, .7, c3) + sh(52, .7, c3) + sh(-26, .88, c2) + sh(26, .88, c2) + sh(0, 1, 'url(#' + id + 'l)');
       if (stage >= 4) for (i = 0; i < 3; i++) o += '<path class="fo-spark" style="animation-delay:' + (i * 0.9) + 's" d="M' + (cx - r * 0.7 + i * r * 0.7) + ' ' + (cy - r * 0.6 + (i % 2) * r * 0.5) + ' l1 2.4 2.4 1 -2.4 1 -1 2.4 -1 -2.4 -2.4 -1 2.4 -1z" fill="#fff"/>';
@@ -636,7 +726,7 @@
   function dprev(id) { return previewCache['d' + id] || (previewCache['d' + id] = decoSVG(id)); }
 
   /* ==========================================================================
-     6) HIỆU ỨNG PHÉP THUẬT (canvas hạt: đom đóm / cánh hoa / lá / tuyết)
+     7) HIỆU ỨNG PHÉP THUẬT (canvas hạt)
      ======================================================================== */
   var Fx = {
     cv: null, ctx: null, parts: [], raf: 0, season: 'summer', w: 0, h: 0, ro: null,
@@ -696,7 +786,7 @@
   };
 
   /* ==========================================================================
-     7) CSS
+     8) CSS
      ======================================================================== */
   function css() {
     if ($('#foStyles')) return;
@@ -743,6 +833,18 @@
       '.fo-pool b{color:var(--accent)}.fo-pool.on{display:block}',
       '.fo-banner{margin-bottom:14px;padding:12px 16px;border-radius:12px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.4);color:var(--danger);font-size:13px;line-height:1.55}',
       '.fo-banner code{background:rgba(239,68,68,.12);padding:1px 6px;border-radius:5px}',
+      /* thẻ giờ học cũ */
+      '.fo-lg{margin-bottom:18px;padding:18px 20px;border-radius:18px;border:1.5px solid rgba(251,191,36,.55);background:linear-gradient(135deg,rgba(251,191,36,.14),rgba(20,120,212,.08));display:flex;gap:18px;align-items:center;flex-wrap:wrap}',
+      '.fo-lg.mute{border-color:var(--card-border);background:var(--card-bg)}',
+      '.fo-lg-ic{width:52px;height:52px;border-radius:16px;background:linear-gradient(135deg,#f59e0b,#fbbf24);color:#fff;font-size:22px;display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:0 8px 20px rgba(245,158,11,.35)}',
+      '.fo-lg-main{flex:1 1 260px;min-width:0}.fo-lg-main h3{font-size:15.5px;font-weight:800;margin-bottom:3px}',
+      '.fo-lg-main p{font-size:12.5px;color:var(--text-muted);line-height:1.55}.fo-lg-main p b{color:var(--text-main)}',
+      '.fo-lg-src{font-size:11.5px;color:var(--text-muted);margin-top:5px}',
+      '.fo-lg-act{display:flex;flex-direction:column;gap:8px;min-width:250px;flex:0 1 300px}',
+      '.fo-lg-row{display:flex;gap:8px;align-items:center}',
+      '.fo-lg-row input{flex:1;min-width:0;padding:8px 10px;border-radius:10px;border:1.5px solid var(--card-border);background:var(--card-bg-solid);color:var(--text-main);font:inherit;font-size:13.5px;text-align:center}',
+      '.fo-lg-row span{font-size:12.5px;font-weight:700;color:var(--text-muted)}',
+      '.fo-lg-prev{font-size:12.5px;font-weight:700;color:var(--warning)}',
       '.fo-sub{font-size:11px;color:var(--text-muted);margin-top:-2px}',
       '.fo-lvbar{height:6px;border-radius:6px;background:rgba(20,120,212,.14);overflow:hidden}.fo-lvbar i{display:block;height:100%;background:linear-gradient(90deg,var(--blue-500),var(--cyan-400))}',
       '.fo-side{padding:14px;position:sticky;top:84px;max-height:calc(100vh - 100px);overflow:auto}',
@@ -757,8 +859,8 @@
       '.fo-sp b{font-size:12.5px}.fo-rar{font-size:10px;font-weight:800;padding:1px 8px;border-radius:10px;color:#fff;background:var(--rc)}.fo-cost{font-size:12px;font-weight:800;color:var(--warning)}',
       '.fo-lock{position:absolute;inset:auto 6px 6px 6px;font-size:10.5px;font-weight:800;color:var(--text-muted)}',
       '.fo-land{padding:12px;border-radius:14px;background:rgba(20,120,212,.07);display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px}',
-      '.fo-btn{padding:8px 13px;border-radius:10px;font-size:12.5px;font-weight:700;background:rgba(20,120,212,.1);color:var(--accent);display:inline-flex;gap:6px;align-items:center}.fo-btn:hover{background:rgba(20,120,212,.2)}',
-      '.fo-btn.pri{background:linear-gradient(135deg,var(--blue-500),var(--cyan-500));color:#fff}.fo-btn.dng{background:rgba(239,68,68,.1);color:var(--danger)}.fo-btn:disabled{opacity:.45;cursor:not-allowed}',
+      '.fo-btn{padding:8px 13px;border-radius:10px;font-size:12.5px;font-weight:700;background:rgba(20,120,212,.1);color:var(--accent);display:inline-flex;gap:6px;align-items:center;justify-content:center}.fo-btn:hover{background:rgba(20,120,212,.2)}',
+      '.fo-btn.pri{background:linear-gradient(135deg,var(--blue-500),var(--cyan-500));color:#fff}.fo-btn.dng{background:rgba(239,68,68,.1);color:var(--danger)}.fo-btn.gold{background:linear-gradient(135deg,#f59e0b,#fbbf24);color:#fff}.fo-btn:disabled{opacity:.45;cursor:not-allowed}',
       '.fo-q{padding:11px 12px;border-radius:12px;background:rgba(20,120,212,.05);margin-bottom:8px}.fo-q.done{background:rgba(22,199,132,.1)}',
       '.fo-q-top{display:flex;justify-content:space-between;gap:8px;font-size:13px;font-weight:700;margin-bottom:6px}.fo-q-top span{color:var(--warning);white-space:nowrap}',
       '.fo-q-bot{display:flex;align-items:center;gap:8px;margin-top:6px;font-size:11.5px;color:var(--text-muted)}.fo-q-bot .fo-lvbar{flex:1}',
@@ -792,18 +894,18 @@
       '.fo-ring{animation:foRing 6s linear infinite;transform-box:fill-box;transform-origin:center}',
       '@keyframes foRing{to{transform:rotate(360deg)}}',
       '@media(prefers-reduced-motion:reduce){.fo-scene *,.fo-scene *::before{animation:none!important}}',
-      '@media(max-width:520px){.fo-bw{padding:56px 4px 28px}.fo-scene{min-height:440px}.fo-name{font-size:9px}}'
+      '@media(max-width:520px){.fo-bw{padding:56px 4px 28px}.fo-scene{min-height:440px}.fo-name{font-size:9px}.fo-lg-act{min-width:100%;flex-basis:100%}}'
     ].join('\n');
     document.head.appendChild(s);
   }
 
   /* ==========================================================================
-     8) DOM: nav + view
+     9) DOM: nav + view
      ======================================================================== */
   function viewHTML() {
     return '<div class="section-head"><div><h2><i class="fa-solid fa-tree"></i> Study Forest</h2><p>Mỗi phút học thật nuôi lớn một khu rừng phép thuật của riêng bạn</p></div>' +
       '<div class="toolbar" id="foSeasons" style="margin:0">' + [['auto', 'Tự động'], ['spring', '🌸 Xuân'], ['summer', '☀️ Hạ'], ['autumn', '🍂 Thu'], ['winter', '❄️ Đông']].map(function (x) { return '<button class="filter-chip" data-s="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div></div>' +
-      '<div id="foBanner"></div><div class="stat-grid" id="foStats"></div>' +
+      '<div id="foBanner"></div><div id="foLegacy"></div><div class="stat-grid" id="foStats"></div>' +
       '<div class="fo-layout"><div><div class="fo-scene" id="foScene" data-season="summer"><div class="fo-sky"></div><div class="fo-stars"></div><div class="fo-aurora"></div><div class="fo-moon"></div>' +
       '<div class="fo-hills"><i></i><i></i></div><div class="fo-fog f1"></div><div class="fo-fog f2"></div><canvas class="fo-fx" id="foFx"></canvas>' +
       '<div class="fo-hint" id="foHint"></div><div class="fo-bw"><div class="fo-board" id="foBoard"></div></div></div><div class="fo-pool" id="foPool"></div></div>' +
@@ -818,7 +920,6 @@
       b.innerHTML = '<i class="fa-solid fa-tree"></i> Study Forest';
       var anchor = $('.nav-item[data-view="schedule"]') || $('.nav-item[data-view="reviewStar"]') || $('.nav-item[data-view="quiz"]');
       if (anchor) anchor.insertAdjacentElement('afterend', b); else nav.appendChild(b);
-      // UIManager.init() gắn click cho mọi .nav-item lúc App.init; nếu đã init rồi thì tự gắn.
       if (window.__appInitialized) b.addEventListener('click', function () { var u = UIM(); if (u) u.navigate('forest'); });
     }
     if (!$('#view-forest')) {
@@ -833,12 +934,15 @@
     $('#foBoard').addEventListener('click', function (e) { var c = e.target.closest('.fo-cell'); if (c) onCell(+c.dataset.pos); });
     $('#foSide').addEventListener('click', onSideClick);
     $('#foHint').addEventListener('click', function (e) { if (e.target.closest('button')) { S.sel = null; renderBoard(); renderSide(); renderHint(); } });
+    var lg = $('#foLegacy');
+    lg.addEventListener('click', onLegacyClick);
+    lg.addEventListener('input', function (e) { if (e.target.id === 'foLgIn') updateLegacyPreview(); });
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && S.sel && S.active) { S.sel = null; renderBoard(); renderSide(); renderHint(); } });
     Fx.init($('#foFx'));
   }
 
   /* ==========================================================================
-     9) RENDER
+     10) RENDER
      ======================================================================== */
   function curSeason() {
     if (S.season !== 'auto') return S.season;
@@ -849,20 +953,72 @@
     $$('#foSeasons .filter-chip').forEach(function (b) { b.classList.toggle('active', b.dataset.s === S.season); });
     Fx.setSeason(s);
   }
-  function renderAll() { if (!S.d) { renderBanner(); return; } renderBanner(); renderStats(); renderBoard(); renderSide(); renderHint(); renderPool(); }
+  function renderAll() { if (!S.d) { renderBanner(); return; } renderBanner(); renderLegacy(); renderStats(); renderBoard(); renderSide(); renderHint(); renderPool(); }
   function renderBanner() {
     var el = $('#foBanner'); if (!el) return;
-    el.innerHTML = S.err === 'perm' ? '<div class="fo-banner"><b><i class="fa-solid fa-triangle-exclamation"></i> Firestore từ chối quyền truy cập.</b> Hãy publish phần rules trong file <code>forest.rules</code> (đoạn <code>match /users/{uid}/forest/{docId}</code>) tại Firebase Console → Firestore → Rules, rồi tải lại trang. Nếu rules đã đúng, hãy kiểm tra đồng hồ máy tính (lệch quá 2 phút sẽ bị chặn khi ghi thời gian học).</div>'
+    el.innerHTML = S.err === 'perm' ? '<div class="fo-banner"><b><i class="fa-solid fa-triangle-exclamation"></i> Firestore từ chối quyền truy cập.</b> Rules cho <code>users/{uid}/forest/main</code> đã có trong file rules hiện tại — hãy chắc chắn bản rules đó đã được publish tại Firebase Console → Firestore → Rules và tài khoản đã được duyệt, rồi tải lại trang. Nếu vẫn lỗi, kiểm tra đồng hồ máy tính (lệch quá 2 phút sẽ bị chặn khi ghi thời gian học).</div>'
       : S.err === 'net' ? '<div class="fo-banner">Không đồng bộ được với máy chủ. Dữ liệu học vẫn được giữ lại trên máy và sẽ gửi lên khi có mạng.</div>' : '';
   }
+
+  /* ---- thẻ GIỜ HỌC CŨ ---- */
+  function srcLine(srcs) {
+    var names = { ls: 'nhật ký trình duyệt', hist: 'lịch sử làm bài', lb: 'bảng xếp hạng', usr: 'hồ sơ tài khoản' }, out = [];
+    Object.keys(names).forEach(function (k) { if (srcs && srcs[k] > 0) out.push(names[k] + ': ' + fmtHr(srcs[k])); });
+    return out.length ? 'Đã quét — ' + out.join(' · ') + '. Hệ thống lấy nguồn LỚN NHẤT (không cộng dồn).' : '';
+  }
+  function renderLegacy() {
+    var el = $('#foLegacy'); if (!el || !S.d) return;
+    var ae = document.activeElement; if (ae && ae.id === 'foLgIn' && el.contains(ae)) return;
+    var L = S.d.legacy, avail = Core.legacyAvail(S.d), per = Core.LEGACY.SEC_PER_SPARK, srcs = S.lgSrcs || L.srcs;
+    var scanBtn = '<button class="fo-btn" data-lg="scan"' + (S.lgBusy ? ' disabled' : '') + '><i class="fa-solid fa-rotate"></i> ' + (S.lgBusy ? 'Đang quét...' : 'Quét lại') + '</button>';
+    if (!S.lgDone && S.lgBusy) {
+      el.innerHTML = '<div class="fo-lg mute"><div class="fo-lg-ic" style="background:var(--accent)"><i class="fa-solid fa-spinner fa-spin"></i></div><div class="fo-lg-main"><h3>Đang tìm giờ học cũ của bạn...</h3><p>Hệ thống đang đọc nhật ký học tập, lịch sử làm bài và bảng xếp hạng.</p></div></div>'; return;
+    }
+    if (S.lgErr && !L.baseSec) {
+      el.innerHTML = '<div class="fo-lg mute"><div class="fo-lg-main"><h3>Chưa quét được giờ học cũ</h3><p>' + esc(S.lgErr) + '</p></div><div class="fo-lg-act">' + scanBtn + '</div></div>'; return;
+    }
+    if (L.baseSec <= 0) {
+      if (!S.lgDone) { el.innerHTML = ''; return; }
+      el.innerHTML = '<div class="fo-lg mute"><div class="fo-lg-ic" style="background:var(--text-muted)"><i class="fa-solid fa-clock-rotate-left"></i></div><div class="fo-lg-main"><h3>Chưa tìm thấy giờ học cũ</h3><p>Không có thời gian học nào trước khi Study Forest được tạo trên tài khoản này. Nếu bạn từng học trên trình duyệt/thiết bị khác, hãy mở Study Forest ở đó rồi bấm "Quét lại".</p></div><div class="fo-lg-act">' + scanBtn + '</div></div>'; return;
+    }
+    if (avail < per) {
+      el.innerHTML = '<div class="fo-lg mute"><div class="fo-lg-ic" style="background:linear-gradient(135deg,#16c784,#0e9d68)"><i class="fa-solid fa-circle-check"></i></div><div class="fo-lg-main"><h3>Đã quy đổi hết giờ học cũ</h3><p>Tổng giờ học cũ <b>' + fmtDur(L.baseSec) + '</b> · đã đổi <b>' + fmtDur(L.convertedSec) + '</b> → <b>' + L.sparks + ' Linh quang</b>.</p><div class="fo-lg-src">' + esc(srcLine(srcs)) + '</div></div><div class="fo-lg-act">' + scanBtn + '</div></div>'; return;
+    }
+    var maxH = Math.floor(avail / 360) / 10, units = Math.floor(avail / per);
+    el.innerHTML = '<div class="fo-lg"><div class="fo-lg-ic"><i class="fa-solid fa-hourglass-half"></i></div>' +
+      '<div class="fo-lg-main"><h3>Bạn có ' + fmtDur(avail) + ' học cũ chưa quy đổi</h3>' +
+      '<p>Cứ <b>' + (per / 60) + ' phút</b> học cũ = <b>1 Linh quang</b> (1 giờ = 10). Số phút đó cũng được cộng vào <b>điểm nuôi cây</b> để lên cấp rừng, mở khoá cây hiếm và nuôi cây lớn. Đổi toàn bộ sẽ nhận <b>+' + units + ' Linh quang</b>.</p>' +
+      '<div class="fo-lg-src">' + esc(srcLine(srcs)) + '</div></div>' +
+      '<div class="fo-lg-act"><div class="fo-lg-row"><input id="foLgIn" type="number" min="0.1" max="' + maxH + '" step="0.1" value="' + maxH + '" data-avail="' + avail + '"><span>giờ</span></div>' +
+      '<div class="fo-lg-prev" id="foLgPrev"></div>' +
+      '<div class="fo-lg-row"><button class="fo-btn gold" data-lg="conv" style="flex:1"><i class="fa-solid fa-wand-magic-sparkles"></i> Đổi số giờ này</button><button class="fo-btn pri" data-lg="all" style="flex:1">Đổi tất cả</button></div>' + scanBtn + '</div></div>';
+    updateLegacyPreview();
+  }
+  function lgInputSec() {
+    var inp = $('#foLgIn'); if (!inp) return 0;
+    var avail = +inp.dataset.avail || 0, sec = Math.round((parseFloat(String(inp.value).replace(',', '.')) || 0) * 3600);
+    return Math.max(0, Math.min(sec, avail));
+  }
+  function updateLegacyPreview() {
+    var pv = $('#foLgPrev'); if (!pv) return; var sec = lgInputSec(), u = Math.floor(sec / Core.LEGACY.SEC_PER_SPARK);
+    pv.textContent = u ? '→ +' + u + ' Linh quang · +' + fmtMin(u * Core.LEGACY.SEC_PER_SPARK / 60) + ' phút nuôi cây' : 'Nhập ít nhất ' + (Core.LEGACY.SEC_PER_SPARK / 60) + ' phút (0,1 giờ)';
+  }
+  function onLegacyClick(e) {
+    var b = e.target.closest('[data-lg]'); if (!b || b.disabled) return; var a = b.dataset.lg;
+    if (a === 'scan') { scanLegacy(true); return; }
+    var sec = a === 'all' ? Core.legacyAvail(S.d) : lgInputSec();
+    if (sec < Core.LEGACY.SEC_PER_SPARK) { toast('warn', 'Study Forest', 'Cần tối thiểu ' + (Core.LEGACY.SEC_PER_SPARK / 60) + ' phút học cũ để đổi 1 Linh quang'); return; }
+    b.disabled = true; convertLegacy(sec);
+  }
+
   function renderStats() {
     var el = $('#foStats'); if (!el || !S.d) return; var d = S.d, e = Core.earned(d), lv = Core.level(e), a = Core.levelMin(lv), b = Core.levelMin(lv + 1);
     var pct = lv >= 50 ? 100 : Math.max(0, Math.min(100, (e - a) / (b - a) * 100)), live = Math.floor(T.buf);
     var plots = Core.sideOf(d.landLevel) * Core.sideOf(d.landLevel), grown = d.trees.filter(function (t) { return Core.stageOf(t) >= 5; }).length;
     var qs = Core.QUESTS.filter(function (q) { return q.scope === 'daily'; }), qDone = qs.filter(function (q) { return d.day.claimed[q.id] || q.get(d) >= q.need; }).length;
     var cards = [
-      ['fa-clock', 'linear-gradient(135deg,#1478d4,#22d3ee)', fmtDur(d.trackedSec + live), 'Tổng thời gian học', 'Hôm nay: ' + fmtDur(d.day.sec + live)],
-      ['fa-seedling', 'linear-gradient(135deg,#16c784,#0e9d68)', fmtMin(e + live / 60) + ' phút', 'Điểm nuôi cây', 'Gồm ' + fmtMin(d.bonusMin) + ' phút thưởng'],
+      ['fa-clock', 'linear-gradient(135deg,#1478d4,#22d3ee)', fmtDur(d.trackedSec + live), 'Giờ học đo bởi Forest', 'Hôm nay: ' + fmtDur(d.day.sec + live)],
+      ['fa-seedling', 'linear-gradient(135deg,#16c784,#0e9d68)', fmtMin(e + live / 60) + ' phút', 'Điểm nuôi cây', 'Gồm ' + fmtMin(d.bonusMin) + ' phút thưởng/quy đổi'],
       ['fa-tree', 'linear-gradient(135deg,#0d5fb3,#3b96e8)', d.trees.length + '/' + plots, 'Số cây', grown + ' cổ thụ phát sáng'],
       ['fa-ranking-star', 'linear-gradient(135deg,#8b5cf6,#6d28d9)', 'Lv.' + lv, 'Cấp độ rừng', '<div class="fo-lvbar"><i style="width:' + pct + '%"></i></div>'],
       ['fa-fire', 'linear-gradient(135deg,#f97316,#ea580c)', d.streak.cur + ' ngày', 'Chuỗi ngày học', 'Kỷ lục ' + d.streak.best + ' ngày'],
@@ -913,7 +1069,7 @@
     var lv = Core.level(Core.earned(d)), bal = Core.balance(d), h = '';
     if (S.tab === 'plant') {
       var nx = Core.LAND[d.landLevel], n = Core.sideOf(d.landLevel);
-      h += '<div class="fo-land"><div><b>Mảnh đất ' + n + '×' + n + '</b><div class="fo-sub">' + (nx ? 'Mở rộng lên ' + (n + 1) + '×' + (n + 1) + ' · cần Lv.' + nx.lv : 'Đã mở rộng tối đa') + '</div></div>' +
+      h += '<div class="fo-land"><div><b>Mảnh đất ' + n + '×' + n + '</b><div class="fo-sub">' + (nx ? 'Mở rộng lên ' + (n + 1) + '×' + (n + 1) + ' · cần Lv.' + nx.lv : 'Đã mở rộng tối đa') + ' · Linh quang: ✨ ' + bal + '</div></div>' +
         (nx ? '<button class="fo-btn pri" data-expand ' + ((lv < nx.lv || bal < nx.cost) ? 'disabled' : '') + '>✨ ' + nx.cost + '</button>' : '') + '</div>';
       ['common', 'rare', 'epic', 'legendary'].forEach(function (r) {
         var R = Core.RARITY[r]; h += '<div class="fo-h" style="color:' + R.color + '">' + R.label + ' · ✨ ' + R.cost + ' · Lv.' + R.minLevel + '+</div><div class="fo-spg">';
@@ -938,7 +1094,7 @@
       h += '<div class="fo-h">Hằng tuần</div>' + Core.QUESTS.filter(function (q) { return q.scope === 'weekly'; }).map(qrow).join('');
       h += '<div class="fo-h">Mốc chuỗi ngày học</div><div class="fo-q"><div class="fo-q-top">7 ngày liên tiếp<span>+30 phút</span></div><div class="fo-lvbar"><i style="width:' + Math.min(100, d.streak.cur / 7 * 100) + '%"></i></div></div><div class="fo-q"><div class="fo-q-top">30 ngày liên tiếp<span>+120 phút</span></div><div class="fo-lvbar"><i style="width:' + Math.min(100, d.streak.cur / 30 * 100) + '%"></i></div><div class="fo-q-bot">Hiện tại: ' + d.streak.cur + ' ngày (1 ngày tính khi học ≥ 5 phút hoặc xong 1 đề)</div></div>';
     } else {
-      h += '<div class="fo-h" style="margin-top:0">Bảng quy đổi</div><table class="fo-tbl"><tr><td>10 phút học thật</td><td>10 phút</td></tr><tr><td>Hoàn thành 1 đề / phần</td><td>+10 phút</td></tr><tr><td>20 flashcard</td><td>+5 phút</td></tr><tr><td>1 phiên Pomodoro</td><td>+25 phút</td></tr><tr><td>Hoàn thành mục tiêu ngày</td><td>+10 phút</td></tr><tr><td>Chuỗi 7 ngày</td><td>+30 phút</td></tr><tr><td>Chuỗi 30 ngày</td><td>+120 phút</td></tr></table>';
+      h += '<div class="fo-h" style="margin-top:0">Bảng quy đổi</div><table class="fo-tbl"><tr><td>10 phút học thật</td><td>10 phút</td></tr><tr><td>Hoàn thành 1 đề / phần</td><td>+10 phút</td></tr><tr><td>20 flashcard</td><td>+5 phút</td></tr><tr><td>1 phiên Pomodoro</td><td>+25 phút</td></tr><tr><td>Hoàn thành mục tiêu ngày</td><td>+10 phút</td></tr><tr><td>Chuỗi 7 ngày</td><td>+30 phút</td></tr><tr><td>Chuỗi 30 ngày</td><td>+120 phút</td></tr><tr><td>Giờ học cũ: 6 phút</td><td>1 ✨ + 6 phút</td></tr></table>';
       h += '<div class="fo-h">6 giai đoạn (cây Common)</div><table class="fo-tbl">' + Core.STAGES.map(function (s, i) { return '<tr><td>' + (i + 1) + '. ' + s + '</td><td>' + Core.THRESH[i] + ' phút</td></tr>'; }).join('') + '</table><div class="fo-sub" style="margin-top:6px">Rare ×1.5 · Epic ×2.2 · Legendary ×3.2</div>';
       h += '<div class="fo-h">Hoạt động gần đây</div>' + (d.log.length ? d.log.map(function (l) { var t = new Date(l.t); return '<div class="fo-log"><time>' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0') + '</time><span>' + esc(l.n) + (l.m ? ' <b style="color:var(--accent)">+' + fmtMin(l.m) + 'p</b>' : '') + '</span></div>'; }).join('') : '<div class="fo-sub">Chưa có hoạt động nào.</div>');
     }
@@ -949,7 +1105,7 @@
   }
 
   /* ==========================================================================
-     10) TƯƠNG TÁC
+     11) TƯƠNG TÁC
      ======================================================================== */
   function run(fn, okMsg) {
     return mutate(fn).then(function (ctx) { if (okMsg) toast('success', 'Study Forest', okMsg); return ctx; }).catch(function (e) { toast('error', 'Study Forest', e.message || 'Không thực hiện được'); handleErr(e, 'action'); });
@@ -957,10 +1113,10 @@
   function onSideClick(e) {
     var b;
     if ((b = e.target.closest('[data-sp]'))) {
-      if (b.classList.contains('locked')) { toast('warn', 'Chưa mở khoá', 'Hãy tăng cấp rừng bằng cách học thêm.'); return; }
+      if (b.classList.contains('locked')) { toast('warn', 'Chưa mở khoá', 'Hãy tăng cấp rừng bằng cách học thêm hoặc quy đổi giờ học cũ.'); return; }
       S.sel = (S.sel && S.sel.id === b.dataset.sp) ? null : { t: 'tree', id: b.dataset.sp };
     } else if ((b = e.target.closest('[data-deco]'))) {
-      if (b.classList.contains('locked')) { toast('warn', 'Chưa mở khoá', 'Hãy tăng cấp rừng bằng cách học thêm.'); return; }
+      if (b.classList.contains('locked')) { toast('warn', 'Chưa mở khoá', 'Hãy tăng cấp rừng bằng cách học thêm hoặc quy đổi giờ học cũ.'); return; }
       S.sel = (S.sel && S.sel.id === b.dataset.deco) ? null : { t: 'deco', id: b.dataset.deco };
     } else if ((b = e.target.closest('[data-expand]'))) { run(function (d, ctx) { Core.expand(d, ctx); }, 'Đã mở rộng mảnh đất!'); return; }
     else if ((b = e.target.closest('[data-claim]'))) { var id = b.dataset.claim; run(function (d, ctx) { return Core.claimQuest(d, id, ctx); }).then(function (c) { if (c && c.out) toast('success', 'Nhận thưởng', '+' + c.out + ' Linh quang'); }); return; }
@@ -1001,13 +1157,12 @@
       '<small>' + (full ? 'Đã phát triển tối đa ✨' : 'Còn ' + Math.ceil(pr.left) + ' phút nữa để lên giai đoạn tiếp theo') + ' · Đã nuôi ' + fmtMin(t.g) + '/' + fmtMin(cap) + ' phút</small>' +
       '<small>Trồng ngày ' + new Date(t.at).toLocaleDateString('vi-VN') + '</small><input id="foRn" maxlength="24" value="' + esc(t.name) + '">' +
       '<div class="row"><button class="fo-btn pri" id="foSv">Lưu tên</button>' + (!full ? '<button class="fo-btn" id="foFc" ' + (isFocus ? 'disabled' : '') + '>' + (isFocus ? '⭐ Đang được nuôi' : '⭐ Ưu tiên nuôi cây này') + '</button>' : '') + '<button class="fo-btn dng" id="foRm">Nhổ cây</button></div>', function (ov, close) {
-        $('#foSv', ov).onclick = function () { var nm = $('#foRn', ov).value; close(); run(function (d) { Core.renameTree(d, id, nm); ctxSkipSettle(); }, 'Đã đổi tên cây'); };
+        $('#foSv', ov).onclick = function () { var nm = $('#foRn', ov).value; close(); run(function (d) { Core.renameTree(d, id, nm); }, 'Đã đổi tên cây'); };
         var fc = $('#foFc', ov); if (fc) fc.onclick = function () { close(); run(function (d) { Core.setFocus(d, id); }, 'Cây này sẽ được nuôi trước'); };
         var rm = $('#foRm', ov), armed = false;
         rm.onclick = function () { if (!armed) { armed = true; rm.textContent = 'Bấm lần nữa để xác nhận'; return; } close(); run(function (d) { Core.removeTree(d, id); }, 'Đã nhổ cây'); };
       });
   }
-  function ctxSkipSettle() { }
   function openDecoModal(id) {
     var x = S.d.decos.filter(function (y) { return y.id === id; })[0]; if (!x) return; var def = Core.DC[x.k];
     modal('<h3>' + esc(def.name) + '</h3><div class="fo-art">' + decoSVG(x.k) + '</div><div class="row"><button class="fo-btn" id="foCl">Đóng</button><button class="fo-btn dng" id="foRd">Gỡ bỏ</button></div>', function (ov, close) {
@@ -1017,189 +1172,14 @@
   }
 
   /* ==========================================================================
-     11) VÒNG ĐỜI: vào/ra view, khởi động sau đăng nhập, đăng xuất
+     12) VÒNG ĐỜI: vào/ra view, khởi động sau đăng nhập, đăng xuất
      ======================================================================== */
   function onEnter() {
     S.active = true; injectDom(); applySeason(); renderAll(); Fx.start();
     if (!S.ready && !S.err) { var b = $('#foStats'); if (b && !S.d) b.innerHTML = '<div class="card" style="padding:20px;grid-column:1/-1;color:var(--text-muted)"><i class="fa-solid fa-spinner fa-spin"></i> Đang tải khu rừng của bạn...</div>'; }
+    else scanLegacy(false);
   }
   function onLeave() { if (!S.active) return; S.active = false; Fx.stop(); }
-
-  /* ==========================================================================
-     11A) IMPORT DỮ LIỆU HỌC CŨ — CHỈ ĐỌC NGUỒN, KHÔNG SỬA/XÓA NGUỒN
-     ----------------------------------------------------------------------------
-     Các nguồn được rules hiện tại cho phép đọc:
-       users/{uid}/studyHistory/{id}
-       users/{uid}/flashDecks/{deckId}/cards/{cardId}
-     Import có dấu vết cố định trong users/{uid}/forest/main. Mỗi document nguồn
-     chỉ được xử lý một lần; tải lại trang/đăng nhập lại không cộng trùng.
-     Chỉ quy đổi những trường có tên/ý nghĩa nhận diện được, không tự đoán.
-     ======================================================================== */
-  var legacyImportBusy = false;
-
-  function legacyNumber(obj, names) {
-    if (!obj || typeof obj !== 'object') return null;
-    for (var i = 0; i < names.length; i++) {
-      var v = obj[names[i]];
-      if (typeof v === 'number' && isFinite(v) && v >= 0) return v;
-      if (typeof v === 'string' && v.trim() !== '' && isFinite(Number(v)) && Number(v) >= 0) return Number(v);
-    }
-    return null;
-  }
-
-  function legacyDate(obj) {
-    if (!obj) return null;
-    var keys = ['completedAt', 'finishedAt', 'createdAt', 'updatedAt', 'date', 'timestamp', 'startedAt'];
-    for (var i = 0; i < keys.length; i++) {
-      var v = obj[keys[i]], n = null;
-      if (v && typeof v.toDate === 'function') n = v.toDate();
-      else if (v && typeof v.toMillis === 'function') n = new Date(v.toMillis());
-      else if (v instanceof Date) n = v;
-      else if (typeof v === 'number') n = new Date(v < 1e12 ? v * 1000 : v);
-      else if (typeof v === 'string' && v) { var parsed = new Date(v); if (!isNaN(parsed.getTime())) n = parsed; }
-      if (n && !isNaN(n.getTime())) return n;
-    }
-    return null;
-  }
-
-  function legacyDurationSec(obj) {
-    var sec = legacyNumber(obj, ['durationSec', 'durationSeconds', 'studySeconds', 'totalSeconds', 'elapsedSeconds', 'timeSpentSeconds']);
-    if (sec !== null) return Math.floor(sec);
-    var min = legacyNumber(obj, ['durationMin', 'durationMinutes', 'studyMinutes', 'totalMinutes', 'timeSpentMinutes', 'minutes']);
-    if (min !== null) return Math.floor(min * 60);
-    var ms = legacyNumber(obj, ['durationMs', 'elapsedMs', 'timeSpentMs']);
-    if (ms !== null) return Math.floor(ms / 1000);
-    return 0;
-  }
-
-  function legacyIsCompleted(obj) {
-    if (!obj) return false;
-    return obj.completed === true || obj.finished === true || obj.isCompleted === true ||
-      obj.status === 'completed' || obj.status === 'finished' || obj.status === 'submitted' ||
-      obj.finishedAt != null || obj.completedAt != null || obj.submittedAt != null;
-  }
-
-  function legacyStableId(prefix, id) {
-    return 'legacy:' + prefix + ':' + String(id).replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 100);
-  }
-
-  async function importLegacyLearningData() {
-    if (legacyImportBusy || !S.uid || !S.ready || !DB()) return;
-    legacyImportBusy = true;
-    try {
-      var db = DB(), uid = S.uid, historySnap = null, decksSnap = null;
-      // Các truy vấn đều là READ ONLY. Nếu collection chưa tồn tại, Firestore trả
-      // về danh sách rỗng; nếu rules từ chối thì bỏ qua riêng nguồn đó.
-      try { historySnap = await db.collection('users').doc(uid).collection('studyHistory').get(); }
-      catch (e) { console.warn('[Forest] Không đọc được studyHistory:', e); }
-
-      try { decksSnap = await db.collection('users').doc(uid).collection('flashDecks').get(); }
-      catch (e) { console.warn('[Forest] Không đọc được flashDecks:', e); }
-
-      var historyRows = [];
-      if (historySnap && !historySnap.empty) {
-        historySnap.forEach(function (doc) {
-          historyRows.push({ id: doc.id, data: doc.data() || {} });
-        });
-      }
-
-      var cardRows = [];
-      if (decksSnap && !decksSnap.empty) {
-        for (var di = 0; di < decksSnap.docs.length; di++) {
-          var deckDoc = decksSnap.docs[di];
-          try {
-            var cardsSnap = await db.collection('users').doc(uid)
-              .collection('flashDecks').doc(deckDoc.id).collection('cards').get();
-            if (cardsSnap && !cardsSnap.empty) {
-              cardsSnap.forEach(function (cardDoc) {
-                cardRows.push({ id: deckDoc.id + '_' + cardDoc.id, data: cardDoc.data() || {} });
-              });
-            }
-          } catch (cardErr) {
-            console.warn('[Forest] Không đọc được flashcards của bộ', deckDoc.id, cardErr);
-          }
-        }
-      }
-
-      if (!historyRows.length && !cardRows.length) return;
-
-      await mutate(function (d, ctx) {
-        d.legacyImport = d.legacyImport || { version: 1, sources: {}, totals: { sec: 0, quiz: 0, cards: 0 } };
-        d.legacyImport.sources = d.legacyImport.sources || {};
-        d.legacyImport.totals = Object.assign({ sec: 0, quiz: 0, cards: 0 }, d.legacyImport.totals || {});
-
-        historyRows.forEach(function (row) {
-          var key = legacyStableId('history', row.id);
-          if (d.legacyImport.sources[key]) return;
-          var x = row.data, sec = legacyDurationSec(x), date = legacyDate(x);
-          var kind = String(x.type || x.kind || x.activityType || x.category || '').toLowerCase();
-          var label = String(x.title || x.name || x.examName || x.lessonName || 'Hoạt động học tập cũ');
-          if (sec > 0) {
-            d.trackedSec += sec;
-            d.legacyImport.totals.sec += sec;
-            if (date && Core.dayKey(date) === Core.dayKey(ctx.now)) {
-              var addToday = Math.min(sec, Math.max(0, Core.DAY_CAP - d.day.sec));
-              d.day.sec += addToday;
-              d.week.sec += addToday;
-              if (d.day.sec >= 300) markImportedActiveDay(d, ctx);
-            }
-            pushLog(d, 'legacy', 0, 'Khôi phục thời gian học: ' + label, ctx);
-          }
-          var importedQuiz = legacyIsCompleted(x) && /(quiz|exam|test|pdf)/.test(kind);
-          if (importedQuiz) {
-            var qid = 'legacyquiz:' + row.id;
-            if (grant(d, Core.BONUS.quiz, qid, 'quiz', 'Khôi phục đề đã hoàn thành: ' + label, ctx)) {
-              d.stats.quiz++;
-              if (date && Core.dayKey(date) === Core.dayKey(ctx.now)) d.day.quiz++;
-              if (date && Core.weekKey(date) === Core.weekKey(ctx.now)) d.week.quiz++;
-            }
-            d.legacyImport.totals.quiz++;
-          }
-          // Không đánh dấu những record không có trường mà Forest hiểu được,
-          // để có thể import lại sau khi xác định đúng cấu trúc dữ liệu.
-          if (sec > 0 || importedQuiz) d.legacyImport.sources[key] = true;
-        });
-
-        cardRows.forEach(function (row) {
-          var key = legacyStableId('card', row.id);
-          if (d.legacyImport.sources[key]) return;
-          var x = row.data;
-          // Chỉ tính thẻ đã có trạng thái ôn/đã trả lời rõ ràng; không thưởng
-          // toàn bộ số thẻ trong bộ vì tạo bộ thẻ không đồng nghĩa đã học.
-          var reviewCount = legacyNumber(x, ['reviewCount', 'timesReviewed', 'repetitions', 'studyCount']);
-          var reviewed = x.reviewed === true || x.isReviewed === true || x.studied === true ||
-            x.mastered === true || x.lastReviewedAt != null || x.reviewedAt != null ||
-            (reviewCount !== null && reviewCount > 0);
-          if (reviewed) {
-            Core.reportCards(d, 1, ctx);
-            d.legacyImport.totals.cards++;
-            d.legacyImport.sources[key] = true;
-          }
-        });
-        d.legacyImport.version = 1;
-      });
-      if (S.active) renderAll();
-      if (historyRows.length || cardRows.length) {
-        console.info('[Forest] Đã kiểm tra dữ liệu cũ:', historyRows.length,
-          'lịch sử học,', cardRows.length, 'thẻ flashcard.');
-      }
-    } catch (e) {
-      console.warn('[Forest] Import dữ liệu học cũ không hoàn tất:', e);
-    } finally {
-      legacyImportBusy = false;
-    }
-  }
-
-  function markImportedActiveDay(d, ctx) {
-    // Không làm thay đổi ngày học hiện tại nếu streak đã được đánh dấu hôm nay.
-    var today = Core.dayKey(ctx.now);
-    if (d.streak.last === today) return;
-    var yesterday = Core.dayKey(Core.addDays(ctx.now, -1));
-    d.streak.cur = d.streak.last === yesterday ? d.streak.cur + 1 : 1;
-    d.streak.last = today;
-    d.streak.best = Math.max(d.streak.best, d.streak.cur);
-    if (d.week.days.indexOf(today) < 0) d.week.days.push(today);
-  }
 
   async function start(user) {
     S.booting = true; S.uid = user.uid;
@@ -1207,15 +1187,15 @@
     try {
       await mutate(function (d, ctx, fresh) { if (!fresh) ctx.skip = true; });
       S.ready = true; S.err = null;
-      // Import lịch sử cũ sau khi tải forest/main; chạy idempotent và chỉ đọc nguồn.
-      importLegacyLearningData();
       var q = S.pending; S.pending = []; q.forEach(function (fn) { try { fn(); } catch (e) { } });
       if (S.active) renderAll();
+      scanLegacy(true); // quét giờ học cũ ngay khi khu rừng sẵn sàng (chỉ đọc, an toàn khi chạy lại)
     } catch (e) { handleErr(e, 'start'); S.uid = null; }
     S.booting = false;
   }
   function stop() {
-    flushTracked(); S.uid = null; S.d = null; S.ready = false; S.err = null; S.sel = null; T.buf = 0; T.cards = 0; S.goalTried = {}; S.prevStage = {};
+    flushTracked(); S.uid = null; S.d = null; S.ready = false; S.err = null; S.sel = null; T.buf = 0; T.cards = 0;
+    S.goalTried = {}; S.prevStage = {}; S.lgBusy = false; S.lgAt = 0; S.lgDone = false; S.lgSrcs = null; S.lgErr = null;
   }
   function boot() {
     injectDom(); hookApp();
@@ -1233,7 +1213,8 @@
     open: function () { var u = UIM(); if (u) u.navigate('forest'); },
     reportFlashcards: reportFlashcards,
     getState: function () { return S.d ? JSON.parse(JSON.stringify(S.d)) : null; },
-    importLegacy: importLegacyLearningData,
+    scanLegacy: function () { return scanLegacy(true); },
+    convertLegacy: convertLegacy,
     _core: Core
   };
 })();
