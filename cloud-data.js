@@ -418,3 +418,180 @@
     status: function () { return { status: S.status, dirty: Object.keys(meta.dirty), lastSync: S.lastSync, uid: S.uid }; }
   };
 })();
+
+/* ============================================================================
+   cloud-data-addon — BỔ SUNG ICON + TOOLTIP + CHỜ ĐỒNG BỘ TRƯỚC ĐĂNG XUẤT
+   ----------------------------------------------------------------------------
+   Phần bổ sung độc lập. Không sửa/xóa logic cũ, không thay đổi Firebase/Rules.
+   ========================================================================== */
+(function () {
+  'use strict';
+  if (window.__cloudDataVisualLogoutAddon) return;
+  window.__cloudDataVisualLogoutAddon = true;
+
+  var STYLE_ID = 'cd-sync-addon-style';
+  var ICON = '<svg class="cd-sync-svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M19.35 10.04A7.49 7.49 0 0 0 5.1 8.1 5.5 5.5 0 0 0 5.5 19h13a4.5 4.5 0 0 0 .85-8.96Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><path class="cd-sync-arrow" d="M9 14.2a3.6 3.6 0 0 1 6.1-2.55M15.1 9.8v2.2h-2.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+  function addStyle() {
+    if (document.getElementById(STYLE_ID)) return;
+    var style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = [
+      '#cdSyncBtn{position:relative!important;display:inline-flex!important;align-items:center!important;justify-content:center!important;visibility:visible!important;opacity:1!important;min-width:38px;min-height:38px;overflow:visible!important;color:var(--text-muted,#64748b);cursor:pointer}',
+      '#cdSyncBtn .cd-sync-svg{display:block!important;width:20px!important;height:20px!important;flex:0 0 20px}',
+      '#cdSyncBtn[data-cd-state="syncing"] .cd-sync-svg,#cdSyncBtn[data-cd-state="pending"] .cd-sync-svg{animation:cdSyncPulse 1.15s ease-in-out infinite}',
+      '#cdSyncBtn[data-cd-state="ok"]{color:var(--success,#16a34a)!important}',
+      '#cdSyncBtn[data-cd-state="error"],#cdSyncBtn[data-cd-state="perm"]{color:var(--danger,#dc2626)!important}',
+      '#cdSyncBtn[data-cd-state="offline"]{color:var(--text-muted,#64748b)!important}',
+      '#cdSyncBtn[data-tip]:hover:after,#cdSyncBtn[data-tip]:focus-visible:after{content:attr(data-tip);position:absolute;z-index:99999;top:calc(100% + 9px);right:0;min-width:150px;max-width:260px;width:max-content;padding:8px 11px;border-radius:8px;background:#172033;color:#fff;font:500 12px/1.45 system-ui,sans-serif;white-space:normal;text-align:center;box-shadow:0 5px 18px rgba(0,0,0,.2);pointer-events:none}',
+      '#cdSyncBtn[data-tip]:hover:before,#cdSyncBtn[data-tip]:focus-visible:before{content:"";position:absolute;z-index:100000;top:calc(100% + 3px);right:13px;border:6px solid transparent;border-bottom-color:#172033;pointer-events:none}',
+      '@keyframes cdSyncPulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.55;transform:scale(.9)}}'
+    ].join('\n');
+    document.head.appendChild(style);
+  }
+
+  function currentStatus() {
+    try { return window.CloudData && typeof window.CloudData.status === 'function' ? window.CloudData.status() : null; }
+    catch (e) { return null; }
+  }
+
+  function installIcon() {
+    addStyle();
+    var btn = document.getElementById('cdSyncBtn');
+    var right = document.querySelector('.topbar-right');
+    if (!btn && right) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.id = 'cdSyncBtn';
+      btn.className = 'icon-btn';
+      btn.addEventListener('click', function () {
+        if (window.CloudData && typeof window.CloudData.syncNow === 'function') {
+          btn.setAttribute('data-tip', 'Đang yêu cầu đồng bộ...');
+          window.CloudData.syncNow().catch(function (e) { console.warn('[CloudData] Sync click:', e); });
+        }
+      });
+      var dark = document.getElementById('darkToggleBtn');
+      if (dark && dark.parentNode === right) right.insertBefore(btn, dark);
+      else right.insertBefore(btn, right.firstChild);
+    }
+    if (!btn) return;
+
+    // Thay icon Font Awesome bằng SVG độc lập, tránh mất icon khi phiên bản FA không hỗ trợ.
+    if (!btn.querySelector('.cd-sync-svg')) btn.innerHTML = ICON;
+    btn.setAttribute('aria-label', 'Trạng thái đồng bộ dữ liệu');
+    btn.setAttribute('title', btn.getAttribute('data-tip') || 'Trạng thái đồng bộ dữ liệu');
+    btn.style.display = 'inline-flex';
+    btn.style.visibility = 'visible';
+    btn.style.opacity = '1';
+
+    var s = currentStatus();
+    if (!s) return;
+    var labels = {
+      idle: 'Chưa đồng bộ',
+      syncing: 'Đang đồng bộ dữ liệu...',
+      pending: 'Có thay đổi chưa đồng bộ',
+      ok: 'Đã đồng bộ thành công',
+      offline: 'Đang ngoại tuyến — dữ liệu sẽ được đồng bộ khi có mạng',
+      error: 'Đồng bộ gặp lỗi — rê chuột để xem trạng thái',
+      perm: 'Không có quyền truy cập Firestore'
+    };
+    var label = labels[s.status] || 'Trạng thái đồng bộ';
+    if (s.status === 'ok' && s.lastSync) {
+      label = 'Đã đồng bộ lúc ' + new Date(s.lastSync).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+    }
+    if (s.status === 'error') label += s.message ? ': ' + s.message : '';
+    btn.setAttribute('data-cd-state', s.status || 'idle');
+    btn.setAttribute('data-tip', label);
+    btn.setAttribute('title', label);
+    btn.setAttribute('aria-label', label);
+  }
+
+  function wait(ms) { return new Promise(function (resolve) { setTimeout(resolve, ms); }); }
+
+  async function flushBeforeLogout() {
+    var api = window.CloudData;
+    if (!api || typeof api.syncNow !== 'function' || typeof api.status !== 'function') return;
+    var initial = api.status();
+    if (!initial || !initial.uid) return; // chưa đăng nhập / đồng bộ chưa khởi động
+
+    var deadline = Date.now() + 20000;
+    var lastError = '';
+    while (Date.now() < deadline) {
+      var state = api.status();
+      if (!state || !state.uid || state.uid !== initial.uid) {
+        throw new Error('Phiên đồng bộ đã thay đổi. Vui lòng thử đăng xuất lại.');
+      }
+      if (!state.dirty || state.dirty.length === 0) {
+        if (state.status === 'error' || state.status === 'perm' || state.status === 'offline') {
+          throw new Error('Không thể xác nhận dữ liệu đã đồng bộ (' + state.status + ').');
+        }
+        return;
+      }
+      if (!navigator.onLine) throw new Error('Thiết bị đang ngoại tuyến. Hãy kết nối mạng rồi đăng xuất lại.');
+      if (state.status === 'error' || state.status === 'perm') {
+        throw new Error('Đồng bộ thất bại: ' + state.status + '. Dữ liệu chưa được xác nhận đã lưu lên cloud.');
+      }
+
+      try { await api.syncNow(); }
+      catch (e) { lastError = e && e.message ? e.message : String(e); }
+      await wait(250);
+    }
+    var finalState = api.status();
+    if (finalState && finalState.dirty && finalState.dirty.length) {
+      throw new Error('Hết thời gian chờ đồng bộ. Còn ' + finalState.dirty.length + ' mục chưa đồng bộ.' + (lastError ? ' ' + lastError : ''));
+    }
+  }
+
+  function showLogoutError(err) {
+    var msg = err && err.message ? err.message : 'Không thể đồng bộ dữ liệu trước khi đăng xuất.';
+    try {
+      if (window.UIManager && typeof window.UIManager.toast === 'function') {
+        window.UIManager.toast('error', 'Chưa thể đăng xuất', msg);
+        return;
+      }
+    } catch (e) { }
+    window.alert('Chưa thể đăng xuất vì dữ liệu chưa được đồng bộ.\n' + msg);
+  }
+
+  function wrapLogout() {
+    try {
+      var auth = window.AuthManager;
+      if (!auth || typeof auth.doSignOut !== 'function' || auth.__cdLogoutFlushAddon) return;
+      var original = auth.doSignOut;
+      auth.doSignOut = async function () {
+        if (window.__cdLogoutFlushInProgress) return original.apply(this, arguments);
+        window.__cdLogoutFlushInProgress = true;
+        try {
+          await flushBeforeLogout();
+          return await original.apply(this, arguments);
+        } catch (err) {
+          showLogoutError(err);
+          throw err; // Không đăng xuất nếu chưa xác nhận đồng bộ xong.
+        } finally {
+          window.__cdLogoutFlushInProgress = false;
+        }
+      };
+      auth.__cdLogoutFlushAddon = true;
+    } catch (e) { console.warn('[CloudData] Không thể bọc hàm đăng xuất:', e); }
+  }
+
+  function bootAddon() {
+    installIcon();
+    wrapLogout();
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', bootAddon, { once: true });
+  else bootAddon();
+
+  // Topbar có thể được dựng lại sau khi đăng nhập/chuyển giao diện; tự khôi phục icon.
+  if (window.MutationObserver && document.documentElement) {
+    var queued = false;
+    var observer = new MutationObserver(function () {
+      if (queued) return;
+      queued = true;
+      Promise.resolve().then(function () { queued = false; installIcon(); wrapLogout(); });
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  }
+  window.setInterval(bootAddon, 1200);
+})();
