@@ -1657,14 +1657,17 @@ nếu Rubric không nêu, dùng thang 10.
         view = document.getElementById("view-" + VIEW_ID);
       }
 
-      if (global.UIManager && global.UIManager.titles) {
-        global.UIManager.titles[VIEW_ID] = [NAV_TITLE, NAV_SUB];
+      // UIManager khai báo bằng const → không có trên window, phải đọc bằng typeof.
+      const ui = typeof UIManager !== "undefined" ? UIManager : global.UIManager || null;
+      if (ui) {
+        ui.titles = ui.titles || {};
+        ui.titles[VIEW_ID] = [NAV_TITLE, NAV_SUB];
       }
 
-      navBtn.addEventListener("click", () => {
-        if (global.UIManager && typeof global.UIManager.navigate === "function") {
-          global.UIManager.navigate(VIEW_ID);
-        } else {
+      // Có UIManager: UIManager.init() (sau đăng nhập) đã tự gắn click → navigate(view), không gắn thêm
+      // để tránh gọi navigate 2 lần. Chỉ tự điều hướng khi trang không có UIManager.
+      if (!ui) {
+        navBtn.addEventListener("click", () => {
           document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
           view.classList.add("active");
           document.querySelectorAll(".nav-item[data-view]").forEach((b) => b.classList.toggle("active", b === navBtn));
@@ -1672,8 +1675,8 @@ nếu Rubric không nêu, dùng thang 10.
           const subEl = document.getElementById("pageSub");
           if (titleEl) titleEl.textContent = NAV_TITLE;
           if (subEl) subEl.textContent = NAV_SUB;
-        }
-      });
+        });
+      }
 
       return view;
     }
