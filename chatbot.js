@@ -1,25 +1,37 @@
 // ==========================================================================
-// KHỈ AI CHATBOT WIDGET - FILE GỘP HOÀN CHỈNH
-// Tích hợp 100% UI Khỉ Robot và Logic API Google Gemini (gói MIỄN PHÍ)
-// (Đã fix lỗi dấu * và câu chúc) — Đã đồng bộ giao diện sáng/tối theo hệ
-// thống (data-theme="dark")
-//
-// CÁCH LẤY API KEY GEMINI (MIỄN PHÍ, không cần thẻ thanh toán):
-// 1. Vào https://aistudio.google.com/app/apikey, đăng nhập bằng tài khoản Google.
-// 2. Bấm "Create API key" (nếu chưa có project, để hệ thống tự tạo miễn phí).
-// 3. Copy chuỗi bắt đầu bằng "AIza..." rồi dán vào GEMINI_API_KEY bên dưới.
-// 4. Gói miễn phí có giới hạn số lượt gọi/phút và /ngày. Nếu gặp lỗi HTTP 429
-//    (quá hạn mức), đợi vài phút hoặc đổi GEMINI_MODEL sang "gemini-3.5-flash-lite"
-//    (model nhanh nhất, hạn mức cao nhất trong gói free).
+// KHỈ AI CHATBOT WIDGET — BẢN ĐÃ VÁ BẢO MẬT
+// Thay đổi so với bản cũ:
+//  1. Không còn API key cứng trong file. Dùng GEMINI_PROXY_URL (khuyên dùng:
+//     Cloudflare Worker / Firebase Function giữ key ở server) hoặc tạm dùng
+//     GEMINI_API_KEY (nhớ giới hạn key theo HTTP referrer trong Google Cloud).
+//  2. Chống XSS: mọi tin nhắn (người dùng + AI) đều được escape trước khi
+//     gán innerHTML; chỉ khôi phục đúng thẻ <b>...</b> của hệ thống.
+//  3. Widget ẩn hoàn toàn cho tới khi app đăng nhập xong (window.__appInitialized).
+//  4. JSON.parse lịch sử chat được bọc try/catch; lịch sử lưu theo từng uid.
 // ==========================================================================
 
 (function initKhiAIChatbot() {
-  // 1. CHÈN GIAO DIỆN HTML & CSS VÀO TRANG
+  // ---------------------- CẤU HÌNH ----------------------
+  // CÁCH 1 (KHUYÊN DÙNG): endpoint proxy của bạn. Proxy nhận POST JSON
+  //   { model, system_instruction, contents, generationConfig }
+  // rồi tự gắn key ở server và trả nguyên JSON của Gemini về.
+  const GEMINI_PROXY_URL = "";
+  // CÁCH 2 (tạm thời): key gắn trực tiếp. PHẢI giới hạn theo HTTP referrer.
+  // ⚠️ Key cũ đã lộ — hãy THU HỒI trong Google AI Studio rồi tạo key mới.
+  const GEMINI_API_KEY = "AQ.Ab8RN6LvfnknMiYHdpdyMSt34r30_Kcd-AscflBVH22AQ2957Q";
+  const GEMINI_MODEL = "gemini-3.5-flash-lite";
+  const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
+  const GEMINI_SYSTEM_PROMPT = "Bạn là một trợ lý ảo hỗ trợ ôn thi. Trả lời ngắn gọn, chính xác bằng tiếng Việt. Tuyệt đối KHÔNG dùng ký tự * (dấu sao) hay định dạng markdown trong câu trả lời. Không tự tạo lời chào kết thúc vì hệ thống sẽ làm việc đó.";
+
+  // ---------------------- GIAO DIỆN ----------------------
   const chatbotUI = `
   <style id="khi-ai-styles">
-  /* Reset cơ bản cho widget */
+  /* Ẩn toàn bộ widget cho tới khi người dùng đăng nhập & app khởi tạo xong */
+  html:not(.khi-ready) #ai-widget-container,
+  html:not(.khi-ready) #bot-chat-window { display:none !important; }
+
   #bot-chat-window *, #ai-widget-container *, #bot-chat-window *::before, #bot-chat-window *::after { box-sizing: border-box; }
-  
+
   :root {
     --blue-950:#031324; --blue-900:#04203f; --blue-800:#063563; --blue-700:#0a4a8a;
     --blue-600:#0d5fb3; --blue-500:#1478d4; --blue-400:#3b96e8; --blue-300:#6fb6f2;
@@ -31,13 +43,11 @@
     --bot-widget-size:84px;
     --bot-z:999999;
   }
-  
-  /* Đã thay đổi để đồng bộ với theme của hệ thống index.html */
   [data-theme="dark"] {
     --card-bg:rgba(9,26,46,.68); --card-bg-solid:#0b1f33; --card-border:rgba(59,150,232,.18);
     --text-main:#eaf4ff; --text-muted:#8fa9c4; --shadow-lg:0 20px 48px rgba(0,0,0,.55);
   }
-  
+
   #ai-widget-container {
     position:fixed; bottom:26px; right:26px; width:var(--bot-widget-size); height:var(--bot-widget-size);
     z-index:var(--bot-z); cursor:pointer; display:flex; align-items:center; justify-content:center;
@@ -52,10 +62,7 @@
     position:absolute; bottom:-2px; width:58%; height:9px; background:rgba(4,32,63,0.28);
     border-radius:50%; animation:bot-shadow-scale 2.2s infinite ease-in-out; z-index:2;
   }
-  
-  /* Đã thay đổi để đồng bộ với theme của hệ thống index.html */
   [data-theme="dark"] .bot-shadow { background:rgba(0,0,0,0.5); }
-  
   .bot-wrapper {
     position:relative; width:100%; height:100%; z-index:3;
     transition:transform .3s cubic-bezier(.175,.885,.32,1.275);
@@ -71,7 +78,7 @@
   .bot-sparkle { animation:bot-twinkle 1.8s infinite ease-in-out; }
   .bot-sparkle:nth-child(2) { animation-delay:.5s; }
   .bot-sparkle:nth-child(3) { animation-delay:1s; }
-  
+
   @keyframes bot-pulse { 0%,100%{transform:scale(1); opacity:.6;} 50%{transform:scale(1.28); opacity:1;} }
   @keyframes bot-rotate { 0%{transform:rotate(0deg);} 100%{transform:rotate(360deg);} }
   @keyframes bot-shadow-scale { 0%,100%{transform:scale(1); opacity:.5;} 50%{transform:scale(.7); opacity:.2;} }
@@ -82,8 +89,7 @@
   @keyframes bot-wave { 0%,100%{transform:rotate(0deg);} 25%{transform:rotate(-18deg);} 75%{transform:rotate(12deg);} }
   @keyframes bot-wag { 0%,100%{transform:rotate(0deg);} 50%{transform:rotate(12deg);} }
   @keyframes bot-twinkle { 0%,100%{opacity:.3; transform:scale(.7);} 50%{opacity:1; transform:scale(1.15);} }
-  
-  /* Chat window */
+
   #bot-chat-window {
     position:fixed; bottom:122px; right:26px; width:370px; max-width:calc(100vw - 44px);
     height:560px; max-height:calc(100vh - 150px); font-family:'Inter',system-ui,sans-serif;
@@ -119,7 +125,7 @@
   }
   .bot-action-btn:hover { background:rgba(255,255,255,.38); transform:scale(1.08); }
   .bot-action-btn.active { background:rgba(34,211,238,.4); }
-  
+
   .bot-chat-body {
     flex:1; padding:18px; overflow-y:auto; display:flex; flex-direction:column; gap:14px;
     scrollbar-width:thin; scrollbar-color:var(--blue-300) transparent; background: transparent;
@@ -130,6 +136,7 @@
     max-width:85%; padding:11px 15px; border-radius:16px; font-size:13.5px; line-height:1.55;
     word-wrap:break-word; animation:bot-msg-spring .4s cubic-bezier(.175,.885,.32,1.275) forwards;
     opacity:0; transform:translateY(10px);
+    -webkit-user-select:text; user-select:text;
   }
   @keyframes bot-msg-spring { to{opacity:1; transform:translateY(0);} }
   .bot-msg.bot { align-self:flex-start; background:var(--card-bg-solid); color:var(--text-main); border:1px solid var(--card-border); border-bottom-left-radius:4px; }
@@ -139,21 +146,19 @@
   .bot-typing span:nth-child(2) { animation-delay:.2s; }
   .bot-typing span:nth-child(3) { animation-delay:.4s; }
   @keyframes bot-typing-dot { 0%{transform:translateY(0); opacity:.5;} 100%{transform:translateY(-4px); opacity:1;} }
-  
+
   .bot-chat-footer { padding:12px 14px; background:rgba(20,120,212,.06); border-top:1px solid var(--card-border); display:flex; gap:8px; align-items:flex-end; }
-  
-  /* Đã thay đổi để đồng bộ với theme của hệ thống index.html */
   [data-theme="dark"] .bot-chat-footer { background:rgba(0,0,0,.25); }
-  
   .bot-input-wrap { flex:1; background:var(--card-bg-solid); border-radius:18px; padding:7px 12px; display:flex; align-items:center; border:1px solid var(--card-border); box-shadow:inset 0 1px 3px rgba(0,0,0,.05); }
   .bot-icon-btn { background:none; border:none; cursor:pointer; color:var(--text-muted); padding:4px; display:flex; align-items:center; justify-content:center; font-size:14px; transition:color .2s; outline:none;}
   .bot-icon-btn:hover { color:var(--accent); }
   .bot-icon-btn.recording { color:var(--danger); animation:bot-pulse 1.5s infinite; }
-  #bot-input { flex:1; border:none; outline:none; background:transparent; resize:none; max-height:100px; padding:4px 8px; font-family:inherit; font-size:13.5px; color:var(--text-main); height:22px; line-height:22px; margin:0;}
+  #bot-input { flex:1; border:none; outline:none; background:transparent; resize:none; max-height:100px; padding:4px 8px; font-family:inherit; font-size:13.5px; color:var(--text-main); height:22px; line-height:22px; margin:0;
+    -webkit-user-select:text; user-select:text; }
   #bot-input::placeholder { color:var(--text-muted); }
   .bot-send-btn { background:var(--accent); color:#fff; border:none; width:38px; height:38px; border-radius:50%; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:transform .2s, background .2s; flex-shrink:0; font-size:13px; outline:none;}
   .bot-send-btn:hover { background:var(--blue-700); transform:scale(1.05); }
-  
+
   @media (max-width:480px) {
     #bot-chat-window { bottom:0; right:0; width:100%; height:100%; max-height:100vh; max-width:100%; border-radius:0; transform:translateY(100%); }
     #bot-chat-window.active { transform:translateY(0); }
@@ -182,16 +187,15 @@
         </div>
       </div>
       <div class="bot-header-actions">
-        <!-- Đã gỡ bỏ nút theme: <button class="bot-action-btn" id="bot-theme-toggle" title="Sáng/Tối"><i class="fa-solid fa-moon"></i></button> -->
         <button class="bot-action-btn" id="bot-tts-toggle" title="Bật/Tắt đọc văn bản"><i class="fa-solid fa-volume-high"></i></button>
         <button class="bot-action-btn" id="bot-close-chat" title="Đóng"><i class="fa-solid fa-xmark"></i></button>
       </div>
     </div>
-  
+
     <div class="bot-chat-body" id="bot-chat-body"></div>
-  
+
     <div class="bot-typing" id="bot-typing-indicator"><span></span><span></span><span></span></div>
-  
+
     <div class="bot-chat-footer">
       <div class="bot-input-wrap">
         <textarea id="bot-input" placeholder="Nhập câu hỏi..." rows="1"></textarea>
@@ -200,7 +204,7 @@
       <button class="bot-send-btn" id="bot-send-btn" title="Gửi (Enter)"><i class="fa-solid fa-paper-plane"></i></button>
     </div>
   </div>
-  
+
   <div id="ai-widget-container">
     <div class="bot-halo"></div>
     <div class="bot-shadow"></div>
@@ -262,19 +266,7 @@
 
   document.body.insertAdjacentHTML('beforeend', chatbotUI);
 
-  // 2. LOGIC XỬ LÝ API GOOGLE GEMINI (MIỄN PHÍ) VÀ UI CHATBOT
-  // => Dán API Key Gemini thật của bạn vào chuỗi bên dưới
-  //    (lấy miễn phí tại https://aistudio.google.com/app/apikey).
-  const GEMINI_API_KEY = "AQ.Ab8RN6KHut-O73NxaX-UHqRSwHz2JR93tswydja9jStEm4-62g";
-  // Model Gemini đang dùng (nằm trong gói miễn phí). Muốn đổi model sau này
-  // chỉ cần sửa đúng dòng này — ví dụ "gemini-3.5-flash-lite" (nhanh nhất,
-  // hạn mức miễn phí cao nhất) hoặc "gemini-3.6-flash" (mạnh hơn, hạn mức thấp hơn).
-  const GEMINI_MODEL = "gemini-3.5-flash-lite";
-  // Endpoint gốc của Gemini API (dùng chung cho mọi model ở trên).
-  const GEMINI_ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models";
-  // System instruction — giữ nguyên nội dung yêu cầu cũ (không dùng dấu *, không tự chúc).
-  const GEMINI_SYSTEM_PROMPT = "Bạn là một trợ lý ảo hỗ trợ ôn thi. Trả lời ngắn gọn, chính xác bằng tiếng Việt. Tuyệt đối KHÔNG dùng ký tự * (dấu sao) hay định dạng markdown trong câu trả lời. Không tự tạo lời chào kết thúc vì hệ thống sẽ làm việc đó.";
-
+  // ---------------------- LOGIC ----------------------
   const widgetContainer = document.getElementById('ai-widget-container');
   const chatWindow = document.getElementById('bot-chat-window');
   const closeChatBtn = document.getElementById('bot-close-chat');
@@ -287,21 +279,47 @@
 
   let isTTSActive = false;
   let chatHistory = [];
+  let historyLoaded = false;
   const DEFAULT_MESSAGE = "Xin chào 👋\n\nTôi là Khỉ AI.\n\nTôi có thể hỗ trợ bạn:\n• Giải thích đáp án\n• Mẹo ôn thi hiệu quả\n• Định hướng ôn tập theo phần\n\nBạn cần hỗ trợ gì?\n\n<b>Cố gắng ôn thi cao học nhé</b>";
 
-  // --- Chat History ---
-  const saveChatHistory = () => { try{ localStorage.setItem('botChatHistory', JSON.stringify(chatHistory)); }catch(e){} };
+  // --- Escape HTML (chống XSS) ---
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // Escape toàn bộ, chỉ khôi phục đúng thẻ <b>…</b> (không thuộc tính) + xuống dòng.
+  const safeHtml = (text) => esc(text)
+    .replace(/&lt;b&gt;(.*?)&lt;\/b&gt;/gs, '<b>$1</b>')
+    .replace(/\n/g, '<br>');
+
+  // --- Đợi app đăng nhập xong mới hiện widget & nạp lịch sử ---
+  const getUid = () => {
+    try { if (typeof fbAuth !== 'undefined' && fbAuth && fbAuth.currentUser) return fbAuth.currentUser.uid; } catch (e) {}
+    return 'guest';
+  };
+  const historyKey = () => 'botChatHistory_' + getUid();
+
+  const saveChatHistory = () => { try { localStorage.setItem(historyKey(), JSON.stringify(chatHistory.slice(-200))); } catch (e) {} };
+
   const loadChatHistory = () => {
+    if (historyLoaded) return;
+    historyLoaded = true;
     let saved = null;
-    try{ saved = localStorage.getItem('botChatHistory'); }catch(e){}
-    if (saved) {
-      chatHistory = JSON.parse(saved);
+    try { saved = JSON.parse(localStorage.getItem(historyKey())); } catch (e) { saved = null; }
+    if (Array.isArray(saved) && saved.length) {
+      chatHistory = saved.filter(m => m && typeof m.text === 'string' && (m.sender === 'bot' || m.sender === 'user'));
       chatHistory.forEach(msg => renderMessage(msg.text, msg.sender, false));
       scrollToBottom();
     } else {
+      chatHistory = [];
       setTimeout(() => addMessage(DEFAULT_MESSAGE, 'bot'), 500);
     }
   };
+
+  const readyPoll = setInterval(() => {
+    if (window.__appInitialized) {
+      clearInterval(readyPoll);
+      document.documentElement.classList.add('khi-ready');
+      loadChatHistory();
+    }
+  }, 400);
 
   const toggleChat = () => {
     const isActive = chatWindow.classList.contains('active');
@@ -316,14 +334,14 @@
   const renderMessage = (text, sender, animate = true) => {
     const msgDiv = document.createElement('div');
     msgDiv.classList.add('bot-msg', sender);
-    msgDiv.innerHTML = text.replace(/\n/g, '<br>');
+    msgDiv.innerHTML = safeHtml(text);
     if (!animate) msgDiv.style.animation = 'none';
     chatBody.appendChild(msgDiv);
     scrollToBottom();
   };
 
   const addMessage = (text, sender) => {
-    if (!text.trim()) return;
+    if (!text || !text.trim()) return;
     chatHistory.push({ text, sender });
     saveChatHistory();
     renderMessage(text, sender);
@@ -332,104 +350,81 @@
 
   const scrollToBottom = () => { chatBody.scrollTop = chatBody.scrollHeight; };
 
-  // --- Logic gọi API AI (Google Gemini) ---
+  // --- Gọi AI ---
   async function callGemini(model, q) {
-    const url = `${GEMINI_ENDPOINT}/${encodeURIComponent(model)}:generateContent`;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": GEMINI_API_KEY
-      },
-      body: JSON.stringify({
-        // Giữ nguyên System Instruction để yêu cầu không sử dụng *
-        system_instruction: { parts: [{ text: GEMINI_SYSTEM_PROMPT }] },
-        contents: [{ role: "user", parts: [{ text: q }] }],
-        generationConfig: { temperature: 0.5 }
-      })
-    });
-    const data = await res.json();
+    const payload = {
+      system_instruction: { parts: [{ text: GEMINI_SYSTEM_PROMPT }] },
+      contents: [{ role: "user", parts: [{ text: q }] }],
+      generationConfig: { temperature: 0.5 }
+    };
+    let res;
+    if (GEMINI_PROXY_URL) {
+      res = await fetch(GEMINI_PROXY_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(Object.assign({ model }, payload))
+      });
+    } else {
+      res = await fetch(`${GEMINI_ENDPOINT}/${encodeURIComponent(model)}:generateContent`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY.trim() },
+        body: JSON.stringify(payload)
+      });
+    }
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
     return { ok: res.ok, status: res.status, data };
   }
 
   async function askAI(q) {
+    if (!window.__appInitialized) return; // chặn gọi khi chưa đăng nhập
     typingIndicator.style.display = 'block';
     scrollToBottom();
 
     let lastErrorMsg = "Lỗi không xác định từ máy chủ.";
 
-    // Kiểm tra nhanh trước khi gọi API: bắt các lỗi dán key sai thường gặp
-    // (còn sót chữ mẫu, key rỗng, dính khoảng trắng...) để báo ngay, không
-    // cần chờ gọi API rồi mới biết. LƯU Ý: từ giữa năm 2026 Google phát hành
-    // 2 dạng key cho Gemini API: dạng cũ "AIza..." và dạng mới "AQ...." (Auth
-    // key) — cả 2 đều hợp lệ, nên KHÔNG được ép buộc key phải bắt đầu bằng
-    // "AIza" (làm vậy sẽ chặn nhầm key AQ. hợp lệ của người dùng mới).
-    const trimmedKey = (GEMINI_API_KEY || '').trim();
-    const looksLikePlaceholder = !trimmedKey || trimmedKey.includes('DÁN_API_KEY');
-    const looksLikeValidFormat = /^(AIza|AQ\.)/.test(trimmedKey);
-    if (looksLikePlaceholder || !looksLikeValidFormat) {
-      typingIndicator.style.display = 'none';
-      addMessage('⚠️ GEMINI_API_KEY trong file chatbot.js chưa hợp lệ (còn trống, còn chữ mẫu, hoặc không đúng định dạng — key Gemini hợp lệ bắt đầu bằng "AIza" hoặc "AQ."). Hãy mở file chatbot.js, xoá sạch giá trị cũ và dán đúng key thật lấy tại aistudio.google.com/app/apikey vào giữa 2 dấu ngoặc kép.', 'bot');
-      return;
+    if (!GEMINI_PROXY_URL) {
+      const k = (GEMINI_API_KEY || '').trim();
+      if (!k || k.includes('DÁN_API_KEY') || !/^(AIza|AQ\.)/.test(k)) {
+        typingIndicator.style.display = 'none';
+        addMessage('⚠️ Chatbot chưa được cấu hình: hãy đặt GEMINI_PROXY_URL (khuyên dùng) hoặc GEMINI_API_KEY hợp lệ trong chatbot.js.', 'bot');
+        return;
+      }
     }
 
     try {
       const { ok, status, data } = await callGemini(GEMINI_MODEL, q);
-
-      // Gemini trả nội dung trong data.candidates[0].content.parts[].text
-      const candidate = data?.candidates?.[0];
-      const parts = candidate?.content?.parts || [];
+      const parts = data?.candidates?.[0]?.content?.parts || [];
       const rawText = parts.map(p => p.text || '').join('');
 
       if (ok && rawText) {
         typingIndicator.style.display = 'none';
-
-        let botResponse = rawText;
-
-        // 1. Loại bỏ toàn bộ các dấu sao (*)
-        botResponse = botResponse.replace(/\*/g, '');
-
-        // 2. Xóa lời chúc cũ (nếu API có tự sinh ra)
+        let botResponse = rawText.replace(/\*/g, '');
         botResponse = botResponse.replace(/Chúc bạn ôn tập tốt cho kì tuyển sinh cao học Đại học kinh tế quốc dân [.!]*\s*/gi, '');
-
-        // 3. Thêm câu chúc yêu cầu (In đậm bằng HTML) vào cuối câu trả lời
         botResponse = botResponse.trim() + '\n\n<b>Cố gắng ôn thi cao học nhé🍀</b>';
-
         addMessage(botResponse, 'bot');
         return;
       }
 
       if (!ok) {
-        console.error(`Lỗi từ model ${GEMINI_MODEL} (HTTP ${status}):`, data);
-        lastErrorMsg = data.error?.message || lastErrorMsg;
-        if (status === 429) lastErrorMsg += ' (Đã vượt hạn mức miễn phí — đợi vài phút hoặc đổi sang model gemini-3.5-flash-lite.)';
-        const errReason = data?.error?.status || '';
-        if (errReason === 'ACCESS_TOKEN_TYPE_UNSUPPORTED') {
-          lastErrorMsg = `Google từ chối key với lỗi "ACCESS_TOKEN_TYPE_UNSUPPORTED". Đây KHÔNG phải lỗi trong file chatbot.js — đây là sự cố đang xảy ra ở phía Google với các API key mới dạng "AQ." (nhiều người dùng khác cũng đang gặp, ghi nhận trên diễn đàn Google AI Developers). Cách xử lý: (1) thử tạo lại key mới ở aistudio.google.com/app/apikey xem có ra key dạng "AIza..." không, (2) nếu vẫn chỉ ra key "AQ.", tạm thời chưa có cách khắc phục từ phía người dùng — cần chờ Google sửa, hoặc theo dõi thông báo tại discuss.ai.google.dev.`;
-        } else if (status === 401 || status === 403) {
-          lastErrorMsg = `API key Gemini không hợp lệ hoặc chưa đủ quyền (HTTP ${status}). Chi tiết từ Google: "${data.error?.message || '(không có)'}". Kiểm tra: (1) đã xoá hết chữ mẫu placeholder trong GEMINI_API_KEY chưa, (2) key có dính khoảng trắng/xuống dòng khi copy không, (3) project của key đã bật "Generative Language API" chưa, (4) key có bị giới hạn API trong Google Cloud Console không.`;
-        }
-
+        console.error(`Lỗi Gemini (HTTP ${status}):`, data);
+        lastErrorMsg = data?.error?.message || lastErrorMsg;
+        if (status === 429) lastErrorMsg += ' (Đã vượt hạn mức — đợi vài phút hoặc đổi model gemini-3.5-flash-lite.)';
+        if (status === 401 || status === 403) lastErrorMsg = `API key không hợp lệ hoặc không đủ quyền (HTTP ${status}). Kiểm tra key, giới hạn referrer và việc bật "Generative Language API".`;
         typingIndicator.style.display = 'none';
         addMessage(`⚠️ Lỗi kết nối: ${lastErrorMsg}`, 'bot');
         return;
       }
 
-      // Không có ok=false nhưng cũng không có text — có thể bị chặn an toàn nội dung
       const blockReason = data?.promptFeedback?.blockReason;
       typingIndicator.style.display = 'none';
       addMessage(blockReason
         ? `Gemini từ chối trả lời vì lý do an toàn nội dung (${blockReason}).`
         : "Không nhận được câu trả lời hợp lệ từ AI.", 'bot');
-      return;
-
     } catch (e) {
-      console.error(`Lỗi mạng khi gọi model ${GEMINI_MODEL}:`, e);
-      lastErrorMsg = "Lỗi mạng, không thể kết nối tới máy chủ AI.";
-
+      console.error('Lỗi mạng khi gọi AI:', e);
       typingIndicator.style.display = 'none';
-      addMessage(`⚠️ ${lastErrorMsg}`, 'bot');
-      return;
+      addMessage('⚠️ Lỗi mạng, không thể kết nối tới máy chủ AI.', 'bot');
     }
   }
 
@@ -439,20 +434,18 @@
     chatInput.value = '';
     chatInput.style.height = '22px';
     addMessage(text, 'user');
-    
     askAI(text);
   };
 
-  chatInput.addEventListener('input', function() {
+  chatInput.addEventListener('input', function () {
     this.style.height = '22px';
     this.style.height = (this.scrollHeight < 100 ? this.scrollHeight : 100) + 'px';
   });
-
   chatInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
-  // --- Chuyển văn bản thành giọng nói (TTS) & Mic ---
+  // --- TTS & Mic ---
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   let recognition;
   if (SpeechRecognition) {
@@ -476,13 +469,12 @@
     isTTSActive = !isTTSActive;
     ttsToggleBtn.classList.toggle('active', isTTSActive);
     ttsToggleBtn.innerHTML = isTTSActive ? '<i class="fa-solid fa-volume-high"></i>' : '<i class="fa-solid fa-volume-xmark"></i>';
-    if (!isTTSActive) window.speechSynthesis.cancel();
+    if (!isTTSActive && window.speechSynthesis) window.speechSynthesis.cancel();
   };
 
   const speak = (text) => {
     if (!window.speechSynthesis) return;
     window.speechSynthesis.cancel();
-    // Bỏ qua các thẻ HTML như <b> và loại bỏ các icon trước khi đọc
     const cleanText = text.replace(/<[^>]*>?/gm, '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}]/gu, '').replace(/[•×*#]/g, '');
     const utterance = new SpeechSynthesisUtterance(cleanText);
     utterance.lang = 'vi-VN';
@@ -490,14 +482,11 @@
     window.speechSynthesis.speak(utterance);
   };
 
-  // --- Gắn sự kiện (Events) ---
   widgetContainer.addEventListener('click', toggleChat);
   closeChatBtn.addEventListener('click', (e) => { e.stopPropagation(); chatWindow.classList.remove('active'); });
   ttsToggleBtn.addEventListener('click', toggleTTS);
   sendBtn.addEventListener('click', handleSend);
   micBtn.addEventListener('click', toggleMic);
 
-  loadChatHistory();
-
-  try { window.parent.postMessage({ type:'chatbot-ready' }, '*'); } catch(e) {}
+  try { window.parent.postMessage({ type: 'chatbot-ready' }, '*'); } catch (e) {}
 })();
