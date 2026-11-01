@@ -3359,54 +3359,20 @@ const App = {
 
 document.addEventListener('DOMContentLoaded', ()=>AuthManager.init());
 // DÁN ĐOẠN CODE CHẶN PHÍM VÀ CHUỘT PHẢI Ở ĐÂY
-document.addEventListener('contextmenu', function(e) {
-    e.preventDefault();
-});
+const isEditable = t => t && (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) || t.isContentEditable);
+const target = e => isEditable(e.target) ? e.target : document.activeElement;
 
-// 1. Chặn click chuột phải
-document.addEventListener('contextmenu', function(e) {
-    e.preventDefault();
-});
+document.addEventListener('contextmenu', e => { if (!isEditable(e.target)) e.preventDefault(); });
+document.addEventListener('copy', e => { if (!isEditable(target(e))) e.preventDefault(); });
 
-// 2. Chặn sự kiện Copy (ngay cả khi họ dùng menu của trình duyệt)
-document.addEventListener('copy', function(e) {
-    e.preventDefault();
-});
-
-// 3. Chặn các tổ hợp phím tắt
-document.addEventListener('keydown', function(e) {
-    // Chặn F12
-    if (e.key === 'F12' || e.keyCode === 123) {
-        e.preventDefault();
-    }
-    // Chặn Ctrl + U (Xem nguồn trang)
-    if (e.ctrlKey && (e.key === 'u' || e.key === 'U')) {
-        e.preventDefault();
-    }
-    // Chặn Ctrl + S (Lưu trang web)
-    if (e.ctrlKey && !e.shiftKey && (e.key === 's' || e.key === 'S')) {
-        e.preventDefault();
-    }
-    // Chặn Ctrl + C (Copy)
-    if (e.ctrlKey && !e.shiftKey && (e.key === 'c' || e.key === 'C')) {
-        e.preventDefault();
-    }
-    // Chặn Ctrl + Shift + S (Chụp màn hình trên một số trình duyệt / Lưu)
-    if (e.ctrlKey && e.shiftKey && (e.key === 's' || e.key === 'S')) {
-        e.preventDefault();
-    }
-    // Chặn Ctrl + Shift + I (Mở DevTools)
-    if (e.ctrlKey && e.shiftKey && (e.key === 'i' || e.key === 'I')) {
-        e.preventDefault();
-    }
-    // Chặn Ctrl + Shift + J (Mở Console)
-    if (e.ctrlKey && e.shiftKey && (e.key === 'j' || e.key === 'J')) {
-        e.preventDefault();
-    }
-    // Chặn Ctrl + Shift + C (Mở Inspect Element)
-    if (e.ctrlKey && e.shiftKey && (e.key === 'c' || e.key === 'C')) {
-        e.preventDefault();
-    }
+document.addEventListener('keydown', e => {
+  const k = (e.key || '').toLowerCase();
+  const ed = isEditable(e.target);
+  if (e.key === 'F12') e.preventDefault();
+  if (e.ctrlKey && k === 'u') e.preventDefault();
+  if (e.ctrlKey && !e.shiftKey && k === 's') e.preventDefault();
+  if (e.ctrlKey && !e.shiftKey && k === 'c' && !ed) e.preventDefault();
+  if (e.ctrlKey && e.shiftKey && ['i','j','c','s'].includes(k) && !ed) e.preventDefault();
 });
 </script>
 
