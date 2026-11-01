@@ -22,6 +22,9 @@
 (() => {
   'use strict';
 
+  // UIManager khai báo bằng const trong index.html → không nằm trên window, đọc bằng typeof.
+  const _UI = () => (typeof UIManager !== 'undefined' ? UIManager : null);
+
   /* ==========================================================================
    * 1. CONFIG — Toàn bộ cấu hình tĩnh của module. Sửa ở đây để thêm/xoá nguồn,
    *    đổi RSS Proxy, đổi tốc độ refresh ... mà không đụng tới phần code khác.
@@ -966,7 +969,9 @@
       btn.innerHTML = '<i class="fa-solid fa-newspaper"></i> Đọc báo <span class="badge" data-role="news-nav-badge" style="display:none;">0</span>';
       nav.appendChild(btn);
       this._navBadge = btn.querySelector('[data-role="news-nav-badge"]');
-      btn.addEventListener('click', () => this._navigateToNews());
+      // Khi có UIManager: UIManager.init() (sau đăng nhập) tự gắn click → navigate, và
+      // navigate đã được wrap ở _bindNavigation. Chỉ tự gắn click khi KHÔNG có UIManager.
+      if (!_UI()) btn.addEventListener('click', () => this._navigateToNews());
     }
 
     _injectViewSection() {
@@ -980,29 +985,34 @@
       this._bindToolbarEvents();
     }
 
-    /** Điều hướng tới view "news", tận dụng UIManager.navigate nếu app có sẵn. */
+    /** Fallback điều hướng khi trang không có UIManager. */
     _navigateToNews() {
-      if (window.UIManager && typeof window.UIManager.navigate === 'function') {
-        if (window.UIManager.titles && !window.UIManager.titles.news) {
-          window.UIManager.titles.news = ['Đọc báo', 'Tin tức tổng hợp từ nhiều nguồn báo, tự cập nhật mỗi phút'];
-        }
-        window.UIManager.navigate('news');
-      } else {
-        // Fallback tự vận hành nếu không có UIManager trong trang.
-        document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
-        const target = document.getElementById('view-news');
-        if (target) target.classList.add('active');
-        document.querySelectorAll('.nav-item[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === 'news'));
+      const ui = _UI();
+      if (ui && typeof ui.navigate === 'function') {
+        ui.navigate('news'); // navigate đã được wrap → tự gọi _onViewEnter
+        return;
       }
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      const target = document.getElementById('view-news');
+      if (target) target.classList.add('active');
+      document.querySelectorAll('.nav-item[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === 'news'));
       this._onViewEnter();
     }
 
     /** Theo dõi việc chuyển sang view khác để dừng auto-refresh (tiết kiệm tài nguyên). */
     _bindNavigation() {
-      document.querySelectorAll('.nav-item[data-view]').forEach(btn => {
-        if (btn.dataset.view === 'news') return;
-        btn.addEventListener('click', () => this._onViewLeave());
-      });
+      const ui = _UI();
+      if (!ui) return;
+      ui.titles = ui.titles || {};
+      if (!ui.titles.news) ui.titles.news = ['Đọc báo', 'Tin tức tổng hợp từ nhiều nguồn báo, tự cập nhật mỗi phút'];
+      if (ui.__newsWrapped || typeof ui.navigate !== 'function') return;
+      ui.__newsWrapped = true;
+      const nav = ui.navigate.bind(ui);
+      ui.navigate = (view) => {
+        const r = nav(view);
+        if (view === 'news') this._onViewEnter(); else this._onViewLeave();
+        return r;
+      };
     }
 
     /** Re-check theme khi user bật/tắt dark mode để cập nhật icon bookmark rỗng/đầy đúng màu (không cần vì dùng CSS var, nhưng vẫn theo dõi để mở rộng sau này). */
@@ -1249,8 +1259,8 @@
 
     /** Toast thông báo — dùng lại hệ thống toast của app nếu có, fallback tự vẽ. */
     _toast(message) {
-      if (window.UIManager && typeof window.UIManager.toast === 'function') {
-        window.UIManager.toast('success', 'Đọc báo', message);
+      if (_UI() && typeof _UI().toast === 'function') {
+        _UI().toast('success', 'Đọc báo', message);
         return;
       }
       const el = document.createElement('div');
