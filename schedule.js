@@ -34,7 +34,15 @@
   /* ============================================================================
      0. TIỆN ÍCH DÙNG CHUNG (tái sử dụng Utils gốc nếu có, fallback nếu chưa nạp)
      ========================================================================== */
-  const hasUtils = typeof window.Utils === 'object' && window.Utils;
+  // Các biến const của index.html (UIManager, QuizManager...) KHÔNG nằm trên window
+  // → phải đọc bằng typeof, không dùng window.X.
+  const UI  = () => (typeof UIManager       !== 'undefined' ? UIManager       : null);
+  const QZ  = () => (typeof QuizManager     !== 'undefined' ? QuizManager     : null);
+  const QM  = () => (typeof QuestionManager !== 'undefined' ? QuestionManager : null);
+  const DB_ = () => (typeof DashboardUI     !== 'undefined' ? DashboardUI     : null);
+  const UT  = () => (typeof Utils           !== 'undefined' ? Utils           : null);
+
+  const hasUtils = !!UT();
   const esc = hasUtils && Utils.escapeHtml ? Utils.escapeHtml.bind(Utils) : function (str) {
     if (str === null || str === undefined) return '';
     return String(str).replace(/[&<>"']/g, s => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[s]));
@@ -262,28 +270,28 @@
     canOpen(ev) { return ['part', 'exam', 'wrong', 'star', 'mock'].includes(ev.type); },
     open(ev) {
       try {
+        const ui = UI(), qz = QZ(), qm = QM();
         switch (ev.type) {
           case 'part': {
             const n = ev.partNumber || Integration.parsePartNumber(ev.title);
-            if (n && typeof window.startQuiz === 'function') { window.startQuiz(n); return true; }
-            if (n && window.QuizManager && typeof QuizManager.startPart === 'function') {
-              const meta = (window.QuestionManager && QuestionManager.allPartsMeta) ? QuestionManager.allPartsMeta() : [];
-              if (meta[n - 1]) { QuizManager.startPart(n - 1); return true; }
-              UIManager.toast('warn', 'Không tìm thấy phần', `Phần ${n} chưa tồn tại trong danh sách phần hiện tại`);
+            if (n && qz && typeof qz.startPart === 'function') {
+              const meta = (qm && qm.allPartsMeta) ? qm.allPartsMeta() : [];
+              if (meta[n - 1]) { qz.startPart(n - 1); return true; }
+              if (ui) ui.toast('warn', 'Không tìm thấy phần', `Phần ${n} chưa tồn tại trong danh sách phần hiện tại`);
               return true;
             }
-            if (window.UIManager) UIManager.navigate('parts');
+            if (ui) ui.navigate('parts');
             return true;
           }
           case 'wrong':
-            if (window.UIManager) UIManager.navigate('reviewWrong');
+            if (ui) ui.navigate('reviewWrong');
             return true;
           case 'star':
-            if (window.UIManager) UIManager.navigate('reviewStar');
+            if (ui) ui.navigate('reviewStar');
             return true;
           case 'exam':
           case 'mock':
-            if (window.UIManager) UIManager.navigate('customExam');
+            if (ui) ui.navigate('customExam');
             return true;
           default:
             return false;
@@ -677,11 +685,11 @@
      7. TOAST / CONFIRM — dùng UIManager có sẵn nếu tồn tại, fallback alert
      ========================================================================== */
   function toast(type, title, msg) {
-    if (window.UIManager && typeof UIManager.toast === 'function') UIManager.toast(type, title, msg);
+    if (UI() && typeof UI().toast === 'function') UI().toast(type, title, msg);
     else console.log(`[${type}] ${title}: ${msg || ''}`);
   }
   function confirmDialog(title, msg, onOk) {
-    if (window.UIManager && typeof UIManager.confirm === 'function') { UIManager.confirm(title, msg, onOk); return; }
+    if (UI() && typeof UI().confirm === 'function') { UI().confirm(title, msg, onOk); return; }
     if (window.confirm(`${title}\n${msg}`)) onOk();
   }
 
@@ -1180,7 +1188,7 @@
     const sel = document.getElementById('schFieldPartSelect');
     if (!sel) return;
     let meta = [];
-    try { if (window.QuestionManager && QuestionManager.allPartsMeta) meta = QuestionManager.allPartsMeta(); } catch (e) {}
+    try { if (QM() && QM().allPartsMeta) meta = QM().allPartsMeta(); } catch (e) {}
     if (!meta.length) {
       sel.innerHTML = `<option value="">(Chưa có dữ liệu phần)</option>`;
       return;
@@ -1433,7 +1441,7 @@
     wrap.querySelector('#schNotifyCloseBtn').addEventListener('click', () => wrap.remove());
     wrap.querySelector('#schNotifyGoBtn').addEventListener('click', () => {
       wrap.remove();
-      if (!Integration.open(occ.event)) { UIManager.navigate('schedule'); openEditModal(occ.occKey); }
+      if (!Integration.open(occ.event)) { if (UI()) UI().navigate('schedule'); openEditModal(occ.occKey); }
     });
     setTimeout(() => { if (document.body.contains(wrap)) wrap.remove(); }, 45000);
   }
@@ -1697,26 +1705,29 @@
      18. HOOK VÀO VÒNG ĐỜI CÓ SẴN — chỉ wrap thêm, không sửa hàm gốc
      ========================================================================== */
   function hookIntoApp() {
-    if (window.UIManager && !UIManager.titles.schedule) {
-      UIManager.titles.schedule = ['Kế hoạch học', 'Lên lịch ôn tập theo tuần/tháng, đồng bộ trực tiếp với hệ thống ôn thi'];
+    const ui = UI();
+    if (ui) {
+      ui.titles = ui.titles || {};
+      if (!ui.titles.schedule) ui.titles.schedule = ['Kế hoạch học', 'Lên lịch ôn tập theo tuần/tháng, đồng bộ trực tiếp với hệ thống ôn thi'];
+      if (typeof ui.navigate === 'function' && !ui.__scheduleWrapped) {
+        const orig = ui.navigate.bind(ui);
+        ui.navigate = function (view) {
+          const result = orig(view);
+          if (view === 'schedule') { syncViewSwitchUI(); renderView(); }
+          return result;
+        };
+        ui.__scheduleWrapped = true;
+      }
     }
-    if (window.UIManager && typeof UIManager.navigate === 'function' && !UIManager.__scheduleWrapped) {
-      const orig = UIManager.navigate.bind(UIManager);
-      UIManager.navigate = function (view) {
-        const result = orig(view);
-        if (view === 'schedule') { syncViewSwitchUI(); renderView(); }
-        return result;
-      };
-      UIManager.__scheduleWrapped = true;
-    }
-    if (window.DashboardUI && typeof DashboardUI.render === 'function' && !DashboardUI.__scheduleWrapped) {
-      const origRender = DashboardUI.render.bind(DashboardUI);
-      DashboardUI.render = function () {
+    const dash = DB_();
+    if (dash && typeof dash.render === 'function' && !dash.__scheduleWrapped) {
+      const origRender = dash.render.bind(dash);
+      dash.render = function () {
         const result = origRender();
         refreshDashboardWidgets();
         return result;
       };
-      DashboardUI.__scheduleWrapped = true;
+      dash.__scheduleWrapped = true;
     }
   }
 
@@ -1748,7 +1759,7 @@
      20. PUBLIC API — window.Schedule (module pattern, không rò rỉ global khác)
      ========================================================================== */
   window.Schedule = {
-    open() { if (window.UIManager) UIManager.navigate('schedule'); },
+    open() { if (UI()) UI().navigate('schedule'); },
     addEvent(data) { const ev = Object.assign({ id: genId(), exceptions: {}, createdAt: Date.now(), updatedAt: Date.now(), repeat: { freq: 'none' }, priority: 'medium', reminder: 10, progress: 0, completed: false }, data); Store.add(ev); refreshDashboardWidgets(); return ev; },
     removeEvent(id) { Store.remove(id); refreshDashboardWidgets(); },
     getEvents() { return Store.all(); },
